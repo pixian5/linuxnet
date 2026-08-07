@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
+import base64
+import binascii
+import hashlib
 import html
+import hmac
 import os
 import subprocess
+import tempfile
+import threading
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,7 +19,16 @@ DEFAULTS = {
     "LIMIT_BYTES": str(1024 * 1024 * 1024),
     "ACTION": "poweroff",
     "STATE_FILE": "/var/lib/traffic-guard/eth0.baseline",
+    "WEB_TOKEN_FILE": "/etc/traffic-guard/web-token",
 }
+MAX_BODY_BYTES = 16 * 1024
+MAX_WORKERS = 32
+SOCKET_TIMEOUT_SECONDS = 5
+MAX_LIMIT_MIB = (2**63 - 1) // (1024 * 1024)
+
+
+class ConfigError(ValueError):
+    pass
 
 
 def read_env_file(path):
@@ -35,21 +50,38 @@ def write_env_file(path, data):
         f"LIMIT_BYTES={data['LIMIT_BYTES']}",
         f"ACTION={data['ACTION']}",
         f"STATE_FILE={data['STATE_FILE']}",
+        f"WEB_TOKEN_FILE={data['WEB_TOKEN_FILE']}",
     ]
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
+    directory = os.path.dirname(path) or "."
+    fd, temp_path = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", dir=directory, text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(temp_path, 0o600)
+        os.replace(temp_path, path)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def read_int(path):
     try:
         with open(path, "r", encoding="utf-8") as fh:
             return int(fh.read().strip())
-    except FileNotFoundError:
+    except (OSError, ValueError):
         return None
 
 
 def run_command(args):
-    result = subprocess.run(args, capture_output=True, text=True, check=False)
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, check=False, timeout=3)
+    except subprocess.TimeoutExpired:
+        return 124, "command timed out"
     return result.returncode, result.stdout.strip() or result.stderr.strip()
 
 
@@ -72,7 +104,12 @@ def format_bytes(value):
 def collect_state(message="", error=""):
     config = read_env_file(CONFIG_FILE)
     iface = config["IFACE"]
-    limit = int(config["LIMIT_BYTES"])
+    try:
+        limit = int(config["LIMIT_BYTES"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ConfigError("LIMIT_BYTES 配置无效") from exc
+    if limit <= 0 or limit > MAX_LIMIT_MIB * 1024 * 1024:
+        raise ConfigError("LIMIT_BYTES 超出有效范围")
     state_file = config["STATE_FILE"]
     tx_file = f"/sys/class/net/{iface}/statistics/tx_bytes"
     current = read_int(tx_file)
@@ -106,8 +143,70 @@ def collect_state(message="", error=""):
 
 
 class Handler(BaseHTTPRequestHandler):
+    server_version = "TrafficGuard/1.0"
+
+    def setup(self):
+        super().setup()
+        self.request.settimeout(SOCKET_TIMEOUT_SECONDS)
+
+    def token(self):
+        config = read_env_file(CONFIG_FILE)
+        try:
+            with open(config["WEB_TOKEN_FILE"], "r", encoding="utf-8") as fh:
+                return fh.read().strip()
+        except (OSError, KeyError):
+            return ""
+
+    def authorized(self):
+        expected = self.token()
+        if not expected:
+            return False
+        header = self.headers.get("Authorization", "")
+        supplied = ""
+        if header.startswith("Bearer "):
+            supplied = header[7:].strip()
+        elif header.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(header[6:], validate=True).decode("utf-8")
+                username, supplied = decoded.split(":", 1)
+                if username != "admin":
+                    supplied = ""
+            except (ValueError, UnicodeError, binascii.Error):
+                supplied = ""
+        return hmac.compare_digest(supplied, expected)
+
+    def require_auth(self):
+        if self.authorized():
+            return True
+        self.send_response(HTTPStatus.UNAUTHORIZED)
+        self.send_header("WWW-Authenticate", 'Basic realm="traffic-guard"')
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return False
+
+    def send_text_error(self, status, message):
+        payload = (
+            "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\">"
+            f"<title>{status.value} {html.escape(status.phrase)}</title>"
+            f"<h1>{status.value} {html.escape(status.phrase)}</h1>"
+            f"<p>{html.escape(message)}</p></html>"
+        ).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def csrf_value(self):
+        return hmac.new(self.token().encode(), b"update-threshold", hashlib.sha256).hexdigest()
+
     def render_page(self, message="", error=""):
-        data = collect_state(message=message, error=error)
+        try:
+            data = collect_state(message=message, error=error)
+        except ConfigError as exc:
+            self.send_text_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+            return
         percent = 0 if data["percent"] is None else data["percent"]
         fill_color = "#22c55e"
         if percent >= 90:
@@ -166,8 +265,9 @@ button:hover {{ filter:brightness(1.08); }}
     <form method=\"post\" action=\"/update-threshold\">
       <label>
         <div class=\"sub\" style=\"margin:0 0 8px;\">阈值（MiB）</div>
-        <input type=\"number\" name=\"limit_mib\" min=\"1\" step=\"1\" value=\"{data['limit_mib']}\" required>
+        <input type=\"number\" name=\"limit_mib\" min=\"1\" max=\"{MAX_LIMIT_MIB}\" step=\"1\" value=\"{data['limit_mib']}\" required>
       </label>
+      <input type=\"hidden\" name=\"csrf\" value=\"{self.csrf_value()}\">
       <button type=\"submit\">保存并立即检查</button>
     </form>
     <div class=\"sub\">当前阈值 {format_bytes(data['limit'])}。如果当前已用出站已经超过新阈值，服务器会立即关机。</div>
@@ -203,11 +303,15 @@ button:hover {{ filter:brightness(1.08); }}
         payload = body.encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
 
     def do_GET(self):
+        if not self.require_auth():
+            return
         parsed = urlparse(self.path)
         if parsed.path not in ("/", "/index.html"):
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -219,7 +323,19 @@ button:hover {{ filter:brightness(1.08); }}
         if self.path != "/update-threshold":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
-        content_length = int(self.headers.get("Content-Length", "0"))
+        if not self.require_auth():
+            return
+        if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/x-www-form-urlencoded":
+            self.send_error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.send_text_error(HTTPStatus.BAD_REQUEST, "Content-Length 无效")
+            return
+        if content_length < 0 or content_length > MAX_BODY_BYTES:
+            self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            return
         payload = self.rfile.read(content_length).decode("utf-8", errors="replace")
         form = parse_qs(payload)
         raw_limit = form.get("limit_mib", [""])[0].strip()
@@ -231,13 +347,23 @@ button:hover {{ filter:brightness(1.08); }}
         except ValueError:
             self.redirect(error="阈值必须是整数 MiB")
             return
-        if limit_mib <= 0:
-            self.redirect(error="阈值必须大于 0")
+        if limit_mib <= 0 or limit_mib > MAX_LIMIT_MIB:
+            self.redirect(error=f"阈值必须在 1 到 {MAX_LIMIT_MIB} MiB 之间")
+            return
+        if not hmac.compare_digest(form.get("csrf", [""])[0], self.csrf_value()):
+            self.redirect(error="CSRF 校验失败")
             return
         config = read_env_file(CONFIG_FILE)
         config["LIMIT_BYTES"] = str(limit_mib * 1024 * 1024)
-        write_env_file(CONFIG_FILE, config)
-        run_command(["systemctl", "start", "traffic-guard.service"])
+        try:
+            write_env_file(CONFIG_FILE, config)
+        except OSError as exc:
+            self.redirect(error=f"保存配置失败：{exc}")
+            return
+        returncode, output = run_command(["systemctl", "start", "traffic-guard.service"])
+        if returncode != 0:
+            self.redirect(error=f"阈值已保存，但立即检查失败：{first_line(output) or returncode}")
+            return
         self.redirect(message=f"阈值已更新为 {limit_mib} MiB，并已立即执行一次检查")
 
     def redirect(self, message="", error=""):
@@ -257,7 +383,29 @@ button:hover {{ filter:brightness(1.08); }}
         return
 
 
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, server_address, request_handler_class):
+        self._worker_slots = threading.BoundedSemaphore(MAX_WORKERS)
+        super().__init__(server_address, request_handler_class)
+
+    def process_request(self, request, client_address):
+        self._worker_slots.acquire()
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._worker_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._worker_slots.release()
+
+
 if __name__ == "__main__":
-    host = os.getenv("HOST", "0.0.0.0")
+    host = os.getenv("HOST", "127.0.0.1")
     port = int(os.getenv("PORT", "5101"))
-    ThreadingHTTPServer((host, port), Handler).serve_forever()
+    BoundedThreadingHTTPServer((host, port), Handler).serve_forever()

@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装静态检查工具
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: 检查 Shell 脚本
+        run: |
+          bash -n scripts/install_linuxnet_stack.sh templates/*.sh
+          shellcheck scripts/install_linuxnet_stack.sh templates/*.sh
+      - name: 运行 Python 测试
+        run: python3 -m unittest discover -s tests -v
+      - name: 编译检查 Python 文件
+        run: python3 -m py_compile templates/traffic-guard-web.py

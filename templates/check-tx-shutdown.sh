@@ -13,6 +13,10 @@ if [ ! -r "$TX_FILE" ]; then
 fi
 
 current=$(cat "$TX_FILE")
+if ! [[ "$current" =~ ^[0-9]+$ ]] || ! [[ "$LIMIT_BYTES" =~ ^[1-9][0-9]*$ ]]; then
+  logger -t traffic-guard "Invalid counter or limit; skipping check"
+  exit 1
+fi
 
 if [ ! -f "$STATE_FILE" ]; then
   printf "%s\n" "$current" > "$STATE_FILE"
@@ -21,6 +25,11 @@ if [ ! -f "$STATE_FILE" ]; then
 fi
 
 baseline=$(cat "$STATE_FILE")
+if ! [[ "$baseline" =~ ^[0-9]+$ ]]; then
+  printf "%s\n" "$current" > "$STATE_FILE"
+  logger -t traffic-guard "Reset invalid baseline for ${IFACE} to ${current} bytes"
+  exit 0
+fi
 
 if [ "$current" -lt "$baseline" ]; then
   printf "%s\n" "$current" > "$STATE_FILE"
