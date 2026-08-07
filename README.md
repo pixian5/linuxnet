@@ -65,7 +65,7 @@ bash scripts/install_linuxnet_stack.sh
 
 ## 自动测试与部署
 
-每次 push 和 pull request 都会运行 Shell 语法、ShellCheck、Python 单元测试和编译检查。部署工作流默认关闭；配置仓库变量 `ENABLE_DEPLOY=true`，并添加以下 Secrets 后，`main` 分支 CI 成功会让服务器在 `/opt/linuxnet` 拉取并重新部署：
+每次 push 和 pull request 都会运行 Shell 语法、ShellCheck、Python 单元测试和编译检查。部署工作流默认关闭；配置仓库变量 `ENABLE_DEPLOY=true`，并添加以下 Secrets 后，`main` 分支 CI 成功会让服务器在 `/opt/linuxnet` 首次 clone 或拉取并重新部署：
 
 - `DEPLOY_SERVER_HOST`
 - `DEPLOY_SERVER_USER`（可选，默认 `root`）

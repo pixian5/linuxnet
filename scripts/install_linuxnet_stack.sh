@@ -283,12 +283,13 @@ EOF
 }
 
 enable_services() {
-  log "重载并启动服务"
+  log "重载并重启服务"
   systemctl daemon-reload
-  systemctl enable --now picosnitch.service
-  systemctl enable --now picosnitch-dash.service
-  systemctl enable --now traffic-guard.timer
-  systemctl enable --now traffic-guard-web.service
+  systemctl enable picosnitch.service picosnitch-dash.service traffic-guard.timer traffic-guard-web.service
+  systemctl restart picosnitch.service
+  systemctl restart picosnitch-dash.service
+  systemctl restart traffic-guard.timer
+  systemctl restart traffic-guard-web.service
 }
 
 verify() {

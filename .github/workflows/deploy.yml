@@ -38,5 +38,16 @@ jobs:
           SERVER_USER: ${{ secrets.DEPLOY_SERVER_USER }}
         run: |
           user="${SERVER_USER:-root}"
-          ssh "$user@$SERVER_HOST" \
-            'cd /opt/linuxnet && git pull --ff-only origin main && bash scripts/install_linuxnet_stack.sh'
+          ssh "$user@$SERVER_HOST" 'bash -s' <<'REMOTE'
+          set -eu
+          if [ -e /opt/linuxnet ] && [ ! -d /opt/linuxnet/.git ]; then
+            echo "/opt/linuxnet 已存在但不是 Git 仓库" >&2
+            exit 1
+          fi
+          if [ ! -d /opt/linuxnet/.git ]; then
+            git clone https://github.com/pixian5/linuxnet.git /opt/linuxnet
+          fi
+          cd /opt/linuxnet
+          git pull --ff-only origin main
+          bash scripts/install_linuxnet_stack.sh
+          REMOTE

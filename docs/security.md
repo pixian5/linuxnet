@@ -35,4 +35,4 @@ journalctl -u picosnitch.service -u picosnitch-dash.service -u traffic-guard.tim
 
 ## GitHub Actions 部署
 
-部署工作流只有在仓库变量 `ENABLE_DEPLOY` 为 `true`、CI 成功且目标分支为 `main` 时运行。服务器目录固定为 `/opt/linuxnet`，更新使用 `git pull --ff-only`，避免自动覆盖服务器上的未提交修改。服务器 host key 必须预先核验并保存到 `DEPLOY_KNOWN_HOSTS` Secret，工作流不会在部署时临时信任 `ssh-keyscan` 的结果。
+部署工作流只有在仓库变量 `ENABLE_DEPLOY` 为 `true`、CI 成功且目标分支为 `main` 时运行。服务器目录固定为 `/opt/linuxnet`；目录不存在时首次 clone，已有仓库使用 `git pull --ff-only`，非 Git 目录则明确失败，避免误覆盖服务器文件。安装脚本会重启受影响的 systemd 单元，确保新版本实际生效。服务器 host key 必须预先核验并保存到 `DEPLOY_KNOWN_HOSTS` Secret，工作流不会在部署时临时信任 `ssh-keyscan` 的结果。
