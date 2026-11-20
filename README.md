@@ -87,14 +87,15 @@ TRAFFIC_GUARD_ACTION=none       # none = 只发通知不关机，便于先观察
 - **`unattended-upgrades` 会持有 dpkg 锁**：安装脚本只在 apt 报锁冲突时重试；不能用 `pgrep unattended` 判断，因为 `unattended-upgrade-shutdown` 是常驻进程并不持锁。
 - **picosnitch 2.x 数据库结构与 1.x 不同**：`exe` 规范化到 `executables` 表，查询必须 JOIN。
 - **189 邮箱短时间连发会被限流**：返回 `535 authentication failed`，看起来像密码错误。发信失败会延迟 30 秒重试（最多 3 次）；`traffic-guard.service` 的 `TimeoutStartSec` 已放宽到 300 秒，否则重试期间 systemd 会杀掉脚本、`poweroff` 永不执行。
+- **Ubuntu 大版本升级会让 venv 失效**：24.04 的 Python 3.12 → 26.04/26.10 的 3.14，旧 venv 报 `No module named picosnitch` 并无限重启。安装脚本已能检测 `pyvenv.cfg` 版本差异并自动重建。
 
 ## 当前开发进度
 
-v0.0.12 已实现邮件失败后延迟重试（30 秒 × 3 次），并修复 systemd 超时会中断重试的连带问题。详见 [docs/20261120-1622-当前开发进度-未标注.md](docs/20261120-1622-当前开发进度-未标注.md)。
+v0.0.13 已完成两台服务器从 Ubuntu 24.04 到 26.10 的升级（内核 7.3.0-1004-azure），并修复 Python 3.14 导致的 venv 失效。详见 [docs/20261120-1759-当前开发进度-未标注.md](docs/20261120-1759-当前开发进度-未标注.md)。
 
 ## 下一步待实现
 
-剩余待办（Ubuntu 26.10 升级、关机流程真机验证、50GB 计量口径核对、Bark 兜底等）见 [docs/20261120-1622-下一步待实现-未标注.md](docs/20261120-1622-下一步待实现-未标注.md)。
+剩余待办（关机流程真机验证、50GB 计量口径核对、Bark 兜底等）见 [docs/20261120-1622-下一步待实现-未标注.md](docs/20261120-1622-下一步待实现-未标注.md)。
 
 ## 自动测试与部署
 
