@@ -326,6 +326,10 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=-/etc/default/traffic-guard
+# 邮件发送失败会延迟重试（默认 30 秒 x 最多 3 次），
+# 默认 90 秒的 TimeoutStartSec 会在重试期间杀掉脚本，导致 poweroff 永远不执行。
+# 这里放大到 5 分钟，保证先发信再关机的流程一定能走完。
+TimeoutStartSec=300
 ExecStart=/usr/local/lib/traffic-guard/check-tx-shutdown.sh
 EOF
 

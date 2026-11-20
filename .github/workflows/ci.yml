@@ -20,6 +20,8 @@ jobs:
           shellcheck scripts/install_linuxnet_stack.sh templates/*.sh tests/*.sh
       - name: 验证流量守卫判定逻辑
         run: bash tests/verify_traffic_guard.sh
+      - name: 验证邮件失败重试
+        run: bash tests/verify_mail_retry.sh
       - name: 运行 Python 测试
         run: python3 -m unittest discover -s tests -v
       - name: 编译检查 Python 文件

@@ -188,10 +188,37 @@ if [ "$DRY_RUN" = "1" ]; then
   exit 0
 fi
 
-{
-  printf 'From: %s\n' "$MAIL_FROM"
-  printf 'To: %s\n' "$MAIL_TO"
-  printf 'Subject: %s\n' "$subject"
-  printf '\n'
-  cat "$body_file"
-} | msmtp --file="$mail_config" "$MAIL_TO" || true
+send_mail() {
+  {
+    printf 'From: %s\n' "$MAIL_FROM"
+    printf 'To: %s\n' "$MAIL_TO"
+    printf 'Subject: %s\n' "$subject"
+    printf '\n'
+    cat "$body_file"
+  } | msmtp --file="$mail_config" "$MAIL_TO"
+}
+
+# 邮件商（如 189）短时间连发会返回 535，换个说法就是限流，等一会儿就好。
+# 因此失败后延迟重试，而不是直接放弃——关机通知丢失的代价比多等 30 秒大得多。
+MAIL_RETRY_DELAY="${MAIL_RETRY_DELAY:-30}"
+MAIL_MAX_ATTEMPTS="${MAIL_MAX_ATTEMPTS:-3}"
+[[ "$MAIL_RETRY_DELAY" =~ ^[0-9]+$ ]] || MAIL_RETRY_DELAY=30
+[[ "$MAIL_MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || MAIL_MAX_ATTEMPTS=3
+
+attempt=1
+while :; do
+  if send_mail; then
+    if [ "$attempt" -gt 1 ]; then
+      logger -t traffic-guard "邮件发送成功（第 ${attempt} 次尝试）"
+    fi
+    exit 0
+  fi
+  if [ "$attempt" -ge "$MAIL_MAX_ATTEMPTS" ]; then
+    # 写日志而不是静默忽略：调用方用 || true 兜底，否则失败完全不可见
+    logger -t traffic-guard "邮件发送失败，已尝试 ${attempt} 次，放弃（详见 /var/log/traffic-guard-msmtp.log）"
+    exit 1
+  fi
+  logger -t traffic-guard "邮件发送失败（第 ${attempt} 次），${MAIL_RETRY_DELAY} 秒后重试"
+  sleep "$MAIL_RETRY_DELAY"
+  attempt=$((attempt + 1))
+done
