@@ -336,14 +336,19 @@ write_mail_config() {
   case "$SMTP_STARTTLS" in on|off) ;; *) echo "SMTP_STARTTLS 只能是 on 或 off"; exit 1 ;; esac
 
   log "写入邮件通知配置（${SMTP_HOST}:${SMTP_PORT}, STARTTLS=${SMTP_STARTTLS}）"
+  # 密码可能含 # ( ) ! 等 shell 特殊字符，必须用单引号包裹；
+  # 内容里若本身带单引号，按 shell 规则转义成 '\''
+  sq() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+  }
   cat > /etc/traffic-guard/gmail-notify.conf <<EOF
-MAIL_FROM=${MAIL_FROM}
-MAIL_TO=${MAIL_TO}
-SMTP_HOST=${SMTP_HOST}
-SMTP_PORT=${SMTP_PORT}
-SMTP_STARTTLS=${SMTP_STARTTLS}
-SMTP_USER=${SMTP_USER}
-SMTP_PASS=${SMTP_PASS}
+MAIL_FROM=$(sq "$MAIL_FROM")
+MAIL_TO=$(sq "$MAIL_TO")
+SMTP_HOST=$(sq "$SMTP_HOST")
+SMTP_PORT=$(sq "$SMTP_PORT")
+SMTP_STARTTLS=$(sq "$SMTP_STARTTLS")
+SMTP_USER=$(sq "$SMTP_USER")
+SMTP_PASS=$(sq "$SMTP_PASS")
 EOF
   chmod 600 /etc/traffic-guard/gmail-notify.conf
 }
