@@ -93,19 +93,21 @@ TRAFFIC_GUARD_HARD_LIMIT_PERCENT=150 # 硬顶百分比，0 表示关闭硬顶
 
 ## 当前开发进度
 
-v0.0.16 实现了“超限自动关机只执行一次”，人工开机后不再被立即关机，到硬顶 150% 再兜底关一次，并在 Web 面板提供人工复位。详见[当前开发进度](docs/20261121-0103-当前开发进度-ChatGPT.md)。v0.0.15 的部署、凭据扫描与计量修复见[上一版进度](docs/20261120-2051-当前开发进度-ChatGPT.md)。
+v0.0.17 把 v0.0.16 部署到 uw.sbbz.tech、ue.sbbz.tech，并在真机验证了关机保护、硬顶与复位接口；自动部署扩展为多机。详见[当前开发进度](docs/20261121-0130-当前开发进度-ChatGPT.md)。
 
 ## 下一步待实现
 
-优先轮换已泄露凭据并验证旧值失效，然后部署新版并验证复位入口与硬顶行为。详见[下一步待实现](docs/20261121-0103-下一步待实现-ChatGPT.md)。
+优先轮换已泄露凭据并验证旧值失效，然后安排真实关机演练与计量口径核对。详见[下一步待实现](docs/20261121-0130-下一步待实现-ChatGPT.md)。
 
 ## 自动测试与部署
 
 推送和拉取请求会触发凭据检查、脚本静态检查、守卫和邮件验证、Python 单元测试及编译检查。部署默认关闭；配置 `ENABLE_DEPLOY=true` 和以下仓库密钥后，仅本仓库 `main` 推送通过 CI（持续集成）才可部署。服务器会核对 `/opt/linuxnet` 的来源、分支、工作区及提交；若远端 `main` 已前进，旧任务停止，不改部署为未经本次检查的版本：
 
-- `DEPLOY_SERVER_HOST`
-- `DEPLOY_SERVER_USER`（可选，默认 `root`）
+- `DEPLOY_SERVER_HOSTS`（多台服务器，用逗号、空格或换行分隔；也可用旧名 `DEPLOY_SERVER_HOST` 只写一台）
+- `DEPLOY_SERVER_USER`（可选，默认 `root`；需具备免密 sudo）
 - `DEPLOY_SSH_PRIVATE_KEY`
 - `DEPLOY_KNOWN_HOSTS`（预先核验的服务器 SSH host key）
+
+多台服务器按顺序部署，任一失败即中止，已成功的机器保持在新版本。当前部署到 `uw.sbbz.tech`、`ue.sbbz.tech`。
 
 安全设计和运维注意事项见 [docs/security.md](docs/security.md)，全部文档见 [文档索引.md](文档索引.md)。

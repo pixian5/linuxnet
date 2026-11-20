@@ -62,4 +62,6 @@ journalctl -u picosnitch.service -u picosnitch-dash.service -u traffic-guard.tim
 
 ## GitHub Actions 部署
 
-只有启用 `ENABLE_DEPLOY=true` 且本仓库 `main` 分支的推送通过 CI（持续集成）时才部署。目标路径固定为 `/opt/linuxnet`；目录不存在时克隆，已有目录须为来源正确、位于 `main` 的独立干净仓库。符号链接、本地改动、未跟踪的非忽略文件、不能快进的本地提交都会中止部署；`__pycache__`、`.DS_Store` 等被忽略的产物不影响。拉取后核对远端 `main` 与通过检查的提交标识（SHA），快进后再次核对本地版本，再执行安装；若分支已前进，旧任务停止。安装以 `sudo -n` 执行，执行前校验部署用户具备免密 sudo（云镜像通常禁用 root 直接登录）。服务器主机密钥须预先核验并存入 `DEPLOY_KNOWN_HOSTS`，不在运行时临时信任新密钥。
+只有启用 `ENABLE_DEPLOY=true` 且本仓库 `main` 分支的推送通过 CI（持续集成）时才部署。服务器地址来自 `DEPLOY_SERVER_HOSTS`，支持逗号、空格或换行分隔的多台机器（旧名 `DEPLOY_SERVER_HOST` 仍可用）；逐台按顺序部署，任一失败即中止，已成功的机器保持新版本。目标路径固定为 `/opt/linuxnet`；目录不存在时克隆，已有目录须为来源正确、位于 `main` 的独立干净仓库。符号链接、本地改动、未跟踪的非忽略文件、不能快进的本地提交都会中止部署；`__pycache__`、`.DS_Store` 等被忽略的产物不影响。拉取后核对远端 `main` 与通过检查的提交标识（SHA），快进后再次核对本地版本，再执行安装；若分支已前进，旧任务停止。安装以 `sudo -n` 执行，执行前校验部署用户具备免密 sudo（云镜像通常禁用 root 直接登录）。服务器主机密钥须预先核验并存入 `DEPLOY_KNOWN_HOSTS`，不在运行时临时信任新密钥。
+
+部署密钥应为专用密钥，不与个人登录密钥复用；吊销时从各服务器 `authorized_keys` 删除对应公钥即可。

@@ -36,14 +36,23 @@ jobs:
           chmod 600 ~/.ssh/known_hosts
       - name: 拉取并部署
         env:
-          SERVER_HOST: ${{ secrets.DEPLOY_SERVER_HOST }}
+          SERVER_HOSTS: ${{ secrets.DEPLOY_SERVER_HOSTS }}
+          SERVER_HOST_FALLBACK: ${{ secrets.DEPLOY_SERVER_HOST }}
           SERVER_USER: ${{ secrets.DEPLOY_SERVER_USER }}
           CI_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
           [[ "$CI_SHA" =~ ^[a-f0-9]{40}$ && "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          # 兼容旧的单机密钥：新名 DEPLOY_SERVER_HOSTS 未设置时回退到 DEPLOY_SERVER_HOST
+          targets="${SERVER_HOSTS:-${SERVER_HOST_FALLBACK:-}}"
+          test -n "$targets"
           user="${SERVER_USER:-root}"
-          ssh "$user@$SERVER_HOST" "bash -s -- '$CI_SHA' '$GITHUB_REPOSITORY'" <<'REMOTE'
+          # 支持逗号、空格或换行分隔的多台服务器；逐台部署，任一失败即中止并保留已成功的机器
+          mapfile -t hosts < <(printf '%s' "$targets" | tr ', ' '\n' | sed '/^$/d')
+          echo "待部署服务器：${hosts[*]}"
+          for host in "${hosts[@]}"; do
+            echo "===== 部署到 $user@$host ====="
+            ssh "$user@$host" "bash -s -- '$CI_SHA' '$GITHUB_REPOSITORY'" <<'REMOTE'
           set -euo pipefail
           sha=$1
           url="https://github.com/$2.git"
@@ -74,3 +83,4 @@ jobs:
           sudo -n true 2>/dev/null || fail "部署用户缺少免密 sudo，无法执行安装"
           sudo -n bash scripts/install_linuxnet_stack.sh
           REMOTE
+          done
