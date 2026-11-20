@@ -11,14 +11,14 @@ ROOT_DIR=$(cd "${SCRIPT_DIR}/.." && pwd)
 TEMPLATE_DIR="${ROOT_DIR}/templates"
 
 PICOSNITCH_VENV="${PICOSNITCH_VENV:-/opt/picosnitch-venv}"
-PICOSNITCH_VERSION="1.0.3"
-PICOSNITCH_DASH_VERSION="2.18.2"
-PLOTLY_VERSION="5.24.1"
-# pandas 2.2.3 是最后一个同时提供 cp312 wheel 的稳定版本之一；Ubuntu 24.04 自带 Python 3.12，
-# 旧值 2.0.3 没有 cp312 wheel，会退化为源码编译并缺少编译环境而失败。
-PANDAS_VERSION="2.2.3"
-PICOSNITCH_DASH_HOST="${PICOSNITCH_DASH_HOST:-127.0.0.1}"
-PICOSNITCH_DASH_PORT="${PICOSNITCH_DASH_PORT:-5100}"
+# picosnitch 2.x 使用预编译 CO-RE BPF 对象（picosnitch/bpf/*.bpf.o），无需运行时编译。
+# 1.x 会在运行时用系统 BCC 编译 BPF 源码，而 Ubuntu 24.04 只有 BCC 0.29，
+# 在 6.14+/7.0 内核上因缺少 BPF_LOAD_ACQ / BPF_F_CPU 等新常量必然失败。
+PICOSNITCH_VERSION="2.2.1"
+PICOSNITCH_WEB_HOST="${PICOSNITCH_WEB_HOST:-127.0.0.1}"
+PICOSNITCH_WEB_PORT="${PICOSNITCH_WEB_PORT:-5100}"
+PICOSNITCH_DB="/var/lib/picosnitch/picosnitch.db"
+PICOSNITCH_CONFIG_DIR="/etc/picosnitch"
 TRAFFIC_GUARD_WEB_HOST="${TRAFFIC_GUARD_WEB_HOST:-127.0.0.1}"
 TRAFFIC_GUARD_WEB_PORT="${TRAFFIC_GUARD_WEB_PORT:-5101}"
 TRAFFIC_GUARD_IFACE="${TRAFFIC_GUARD_IFACE:-eth0}"
@@ -40,15 +40,15 @@ validate_inputs() {
     echo "PICOSNITCH_VENV 必须是安全的绝对路径"
     exit 1
   }
-  [[ "$PICOSNITCH_DASH_HOST" =~ ^(127\.0\.0\.1|::1)$ ]] || {
-    echo "PICOSNITCH_DASH_HOST 必须是 127.0.0.1 或 ::1"
+  [[ "$PICOSNITCH_WEB_HOST" =~ ^(127\.0\.0\.1|::1)$ ]] || {
+    echo "PICOSNITCH_WEB_HOST 必须是 127.0.0.1 或 ::1"
     exit 1
   }
   [[ "$TRAFFIC_GUARD_WEB_HOST" =~ ^(127\.0\.0\.1|::1)$ ]] || {
     echo "TRAFFIC_GUARD_WEB_HOST 必须是 127.0.0.1 或 ::1"
     exit 1
   }
-  [[ "$PICOSNITCH_DASH_PORT" =~ ^[0-9]+$ && "$PICOSNITCH_DASH_PORT" -ge 1 && "$PICOSNITCH_DASH_PORT" -le 65535 ]] || { echo "PICOSNITCH_DASH_PORT 无效"; exit 1; }
+  [[ "$PICOSNITCH_WEB_PORT" =~ ^[0-9]+$ && "$PICOSNITCH_WEB_PORT" -ge 1 && "$PICOSNITCH_WEB_PORT" -le 65535 ]] || { echo "PICOSNITCH_WEB_PORT 无效"; exit 1; }
   [[ "$TRAFFIC_GUARD_WEB_PORT" =~ ^[0-9]+$ && "$TRAFFIC_GUARD_WEB_PORT" -ge 1 && "$TRAFFIC_GUARD_WEB_PORT" -le 65535 ]] || { echo "TRAFFIC_GUARD_WEB_PORT 无效"; exit 1; }
   [[ "$TRAFFIC_GUARD_IFACE" =~ ^[A-Za-z0-9_.:-]+$ ]] || { echo "TRAFFIC_GUARD_IFACE 包含非法字符"; exit 1; }
   [[ "$TRAFFIC_GUARD_LIMIT_MIB" =~ ^[1-9][0-9]*$ && "$TRAFFIC_GUARD_LIMIT_MIB" -le 8796093022207 ]] || { echo "TRAFFIC_GUARD_LIMIT_MIB 必须是有效正整数"; exit 1; }
@@ -73,12 +73,11 @@ require_file() {
 install_packages() {
   log "安装系统依赖"
   apt-get update
+  # 不再需要 bpfcc-tools：picosnitch 2.x 使用预编译 CO-RE 对象，只用内核/libbpf，不需要 BCC
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3 \
     python3-venv \
     python3-pip \
-    bpfcc-tools \
-    python3-bpfcc \
     sqlite3 \
     msmtp-mta \
     ca-certificates
@@ -86,76 +85,57 @@ install_packages() {
 
 install_picosnitch() {
   log "安装 Picosnitch venv"
-  python3 -m venv --system-site-packages "$PICOSNITCH_VENV"
+  python3 -m venv "$PICOSNITCH_VENV"
   "$PICOSNITCH_VENV/bin/pip" install --upgrade pip setuptools wheel
-  "$PICOSNITCH_VENV/bin/pip" install --upgrade \
-    "dash==${PICOSNITCH_DASH_VERSION}" \
-    "plotly==${PLOTLY_VERSION}" \
-    "pandas==${PANDAS_VERSION}" \
-    psutil
-  # 强制重装 picosnitch 本体，把上一次部署打过的补丁覆盖回上游原始文件。
-  # 否则补丁脚本会因为目标字符串已被替换而报“命中 0 次”，导致二次部署失败。
-  # 注意必须 --no-deps，否则会把 dash/pandas/plotly 一起拖着重装；因此 psutil 在上一条命令显式安装。
-  "$PICOSNITCH_VENV/bin/pip" install --upgrade --force-reinstall --no-deps \
+  # 2.x 是预编译 BPF 包，依赖由 pip 自动解析；--force-reinstall 保证可重复部署
+  "$PICOSNITCH_VENV/bin/pip" install --upgrade --force-reinstall \
     "picosnitch==${PICOSNITCH_VERSION}"
 }
 
-patch_picosnitch_ui() {
-  log "修补 Picosnitch Web 默认值与中文文案"
-  local target
-  target=$("$PICOSNITCH_VENV/bin/python" - <<'PY'
-import site
-paths = site.getsitepackages()
-for base in paths:
-    candidate = base + "/picosnitch.py"
-    try:
-        with open(candidate, "r", encoding="utf-8"):
-            print(candidate)
-            break
-    except FileNotFoundError:
-        continue
-PY
-)
-  if [ -z "$target" ]; then
-    echo "找不到 picosnitch.py"
-    exit 1
-  fi
-  "$PICOSNITCH_VENV/bin/python" - "$target" <<'PY'
-import sys
-from pathlib import Path
+configure_picosnitch() {
+  log "写入 Picosnitch 配置（关闭桌面通知与 GeoIP 下载，服务器无需这些）"
+  install -d -m 755 "$PICOSNITCH_CONFIG_DIR"
+  # 2.x 首次运行会写出默认 config.toml；这里直接写好，避免依赖首次启动时机。
+  # 只覆盖我们关心的项，其余用上游默认值。
+  cat > "${PICOSNITCH_CONFIG_DIR}/config.toml" <<'EOF'
+[database]
+enabled = true
+retention_days = 30
+write_limit_seconds = 10
+text_log = false
 
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-replacements = [
-    ("interval=10000", "interval=30000", 1),
-    ('{"label": "Show Full Labels", "value": False}', '{"label": "显示完整标签", "value": False}', 1),
-    ('options=[{"label": f"Select {dim_labels[x]}", "value": x} for x in all_dims]', 'options=[{"label": f"选择{dim_labels[x]}", "value": x} for x in all_dims]', 1),
-    ('options=[{"label": f"Where {dim_labels[x]}", "value": x} for x in all_dims]', 'options=[{"label": f"筛选{dim_labels[x]}", "value": x} for x in all_dims]', 1),
-    ('"exe": "Executable"', '"exe": "可执行文件"', 1),
-    ('{"label": "Auto-Refresh (10 minutes)", "value": 600},\n                    ],\n                    value=0,', '{"label": "Auto-Refresh (10 minutes)", "value": 600},\n                    ],\n                    value=30,', 1),
-]
-changed = False
-for old, new, expected in replacements:
-    old_count = text.count(old)
-    new_count = text.count(new)
-    if old_count == expected:
-        text = text.replace(old, new)
-        changed = True
-        continue
-    # 已经打过补丁：目标字符串为 0 次且替换后字符串正好为期望次数，视为幂等通过
-    if old_count == 0 and new_count >= expected:
-        continue
-    raise SystemExit(f"Picosnitch {path.name} 补丁不兼容：期望命中 {expected} 次，实际 {old_count} 次：{old[:60]}")
+[data]
+owner = "root"
+group = "root"
+mode = "0644"
 
-if changed:
-    path.write_text(text, encoding="utf-8")
-PY
+[log]
+addresses = true
+commands = true
+ports = true
+ignore_ports = []
+ignore_domains = []
+ignore_ips = []
+ignore_sha256 = []
+
+[desktop]
+user = ""
+notifications = false
+geoip_lookup = false
+
+[monitoring]
+every_exe = false
+perf_ring_buffer_pages = 256
+conn_map_max_entries = 65536
+EOF
+  chmod 600 "${PICOSNITCH_CONFIG_DIR}/config.toml"
 }
 
 write_picosnitch_services() {
   log "写入 Picosnitch systemd 服务"
   mkdir -p /etc/systemd/system
 
+  # 采用上游 2.x 官方单元的关键项（FHS 目录、LimitMEMLOCK、加固），确保 BPF 环形缓冲区能正常映射
   cat > /etc/systemd/system/picosnitch.service <<EOF
 [Unit]
 Description=Picosnitch
@@ -166,27 +146,54 @@ Wants=network-online.target
 Type=simple
 Restart=always
 RestartSec=5
-ExecStart=${PICOSNITCH_VENV}/bin/picosnitch start-no-daemon
-PIDFile=/run/picosnitch.pid
+ExecStart=${PICOSNITCH_VENV}/bin/python3 -m picosnitch start-no-daemon
+PIDFile=/run/picosnitch/picosnitch.pid
+
+RuntimeDirectory=picosnitch
+StateDirectory=picosnitch
+LogsDirectory=picosnitch
+CacheDirectory=picosnitch
+ConfigurationDirectory=picosnitch
+
+# libbpf 需要 mmap 约 16 MiB 的 per-cpu perf ring buffer，默认 8 MiB 上限会失败
+LimitMEMLOCK=infinity
+
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/var/lib/picosnitch /var/log/picosnitch /run/picosnitch /var/cache/picosnitch
+PrivateTmp=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_BPF CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_NET_ADMIN CAP_PERFMON CAP_SETGID CAP_SETUID CAP_SYS_ADMIN CAP_SYS_PTRACE
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
+  # 2.x 的 webui 是独立前台进程，用 PICOSNITCH_HOST/PORT 控制监听地址
   cat > /etc/systemd/system/picosnitch-dash.service <<EOF
 [Unit]
-Description=Picosnitch Dash Web UI
+Description=Picosnitch Web UI
 After=network-online.target picosnitch.service
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=root
-Environment=HOST=${PICOSNITCH_DASH_HOST}
-Environment=PORT=${PICOSNITCH_DASH_PORT}
-ExecStart=${PICOSNITCH_VENV}/bin/picosnitch start-dash
+Environment=PICOSNITCH_HOST=${PICOSNITCH_WEB_HOST}
+Environment=PICOSNITCH_PORT=${PICOSNITCH_WEB_PORT}
+ExecStart=${PICOSNITCH_VENV}/bin/picosnitch webui
 Restart=always
 RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target
@@ -317,7 +324,7 @@ verify() {
   systemctl is-active --quiet picosnitch-dash.service
   systemctl is-active --quiet traffic-guard.timer
   systemctl is-active --quiet traffic-guard-web.service
-  /usr/bin/python3 - "$PICOSNITCH_DASH_HOST" "$PICOSNITCH_DASH_PORT" "$TRAFFIC_GUARD_WEB_HOST" "$TRAFFIC_GUARD_WEB_PORT" <<'PY'
+  /usr/bin/python3 - "$PICOSNITCH_WEB_HOST" "$PICOSNITCH_WEB_PORT" "$TRAFFIC_GUARD_WEB_HOST" "$TRAFFIC_GUARD_WEB_PORT" <<'PY'
 import base64
 import sys
 import time
@@ -337,7 +344,7 @@ checks = [
 ]
 for name, request in checks:
     last_error = None
-    for _ in range(10):
+    for _ in range(20):
         try:
             with urlopen(request, timeout=3) as response:
                 if response.status == 200:
@@ -349,15 +356,34 @@ for name, request in checks:
     else:
         raise SystemExit(f"{name} 健康检查失败：{last_error}")
 PY
+  # 确认 picosnitch 真的加载了 BPF 并写入采集数据，避免“服务 active 但实际没工作”
+  local deadline=$((SECONDS + 60))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if [ -s "$PICOSNITCH_DB" ] && [ "$(sqlite3 "$PICOSNITCH_DB" 'SELECT count(*) FROM connections;' 2>/dev/null || echo 0)" -gt 0 ]; then
+      log "Picosnitch 已采集到连接记录"
+      break
+    fi
+    sleep 3
+  done
+  if [ ! -s "$PICOSNITCH_DB" ]; then
+    echo "Picosnitch 数据库未生成：$PICOSNITCH_DB"
+    systemctl status picosnitch.service --no-pager -l | head -20
+    exit 1
+  fi
+  # 桌面通知相关错误只在无图形环境时出现，记录但不阻断
+  if [ -s /var/log/picosnitch/error.log ]; then
+    log "Picosnitch 错误日志（前 5 行）："
+    head -5 /var/log/picosnitch/error.log
+  fi
   echo
-  echo "Picosnitch Web: http://${PICOSNITCH_DASH_HOST}:${PICOSNITCH_DASH_PORT}"
+  echo "Picosnitch Web: http://${PICOSNITCH_WEB_HOST}:${PICOSNITCH_WEB_PORT}"
   echo "Traffic Guard Web: http://${TRAFFIC_GUARD_WEB_HOST}:${TRAFFIC_GUARD_WEB_PORT}（Basic 用户名：admin，密码见 /etc/traffic-guard/web-token）"
 }
 
 validate_inputs
 install_packages
 install_picosnitch
-patch_picosnitch_ui
+configure_picosnitch
 write_picosnitch_services
 write_traffic_guard_files
 write_traffic_guard_services

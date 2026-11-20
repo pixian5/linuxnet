@@ -2,7 +2,8 @@
 set -euo pipefail
 
 CONF="/etc/traffic-guard/gmail-notify.conf"
-DB_PATH="/root/.config/picosnitch/snitch.db"
+# picosnitch 2.x 的数据库位置；1.x 是 /root/.config/picosnitch/snitch.db
+DB_PATH="${DB_PATH:-/var/lib/picosnitch/picosnitch.db}"
 
 [ -f "$CONF" ] || exit 0
 
@@ -81,22 +82,67 @@ if not path.exists():
 
 conn = sqlite3.connect(path)
 cur = conn.cursor()
-queries = {
-    "上传前5": """
-        SELECT COALESCE(NULLIF(exe, ''), '[未知程序]') AS exe, SUM(send) AS total
-        FROM connections
-        GROUP BY exe
-        ORDER BY total DESC, exe ASC
-        LIMIT 5
-    """,
-    "下载前5": """
-        SELECT COALESCE(NULLIF(exe, ''), '[未知程序]') AS exe, SUM(recv) AS total
-        FROM connections
-        GROUP BY exe
-        ORDER BY total DESC, exe ASC
-        LIMIT 5
-    """,
-}
+
+
+def has_table(name):
+    row = cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    return row is not None
+
+
+def columns(table):
+    return {r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+# picosnitch 2.x 把 exe 规范化到 executables 表，connections 只存 exe_id；
+# 1.x 直接在 connections 里有 exe 列。两套 schema 都要能读。
+if "exe" in columns("connections"):
+    queries = {
+        "上传前5": """
+            SELECT COALESCE(NULLIF(exe, ''), '[未知程序]') AS exe, SUM(send) AS total
+            FROM connections
+            GROUP BY exe
+            ORDER BY total DESC, exe ASC
+            LIMIT 5
+        """,
+        "下载前5": """
+            SELECT COALESCE(NULLIF(exe, ''), '[未知程序]') AS exe, SUM(recv) AS total
+            FROM connections
+            GROUP BY exe
+            ORDER BY total DESC, exe ASC
+            LIMIT 5
+        """,
+    }
+elif has_table("executables") and "exe_id" in columns("connections"):
+    queries = {
+        "上传前5": """
+            SELECT COALESCE(NULLIF(e.exe, ''), NULLIF(e.name, ''), '[未知程序]') AS exe,
+                   SUM(c.send) AS total
+            FROM connections c
+            JOIN executables e ON e.id = c.exe_id
+            GROUP BY exe
+            ORDER BY total DESC, exe ASC
+            LIMIT 5
+        """,
+        "下载前5": """
+            SELECT COALESCE(NULLIF(e.exe, ''), NULLIF(e.name, ''), '[未知程序]') AS exe,
+                   SUM(c.recv) AS total
+            FROM connections c
+            JOIN executables e ON e.id = c.exe_id
+            GROUP BY exe
+            ORDER BY total DESC, exe ASC
+            LIMIT 5
+        """,
+    }
+else:
+    queries = {}
+if not queries:
+    print("上传前5")
+    print("1. 数据库结构无法识别")
+    print()
+    print("下载前5")
+    print("1. 数据库结构无法识别")
 for idx, (title, query) in enumerate(queries.items()):
     print(title)
     rows = cur.execute(query).fetchall()
