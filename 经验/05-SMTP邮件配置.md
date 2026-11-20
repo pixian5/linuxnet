@@ -85,7 +85,42 @@ smtpmsg='535 authentication failed: -200' errormsg='authentication failed (metho
 
 排查时要先确认“同样的配置之前成功过吗”。如果成功过，优先怀疑限流而不是密码。
 
-设计通知逻辑时，避免一次触发连发多封。本项目原逻辑在单次检查同时越过预警线和阈值时会连发“预警 + 关机”两封，第二封（更重要的关机通知）很可能被拒。现在改为越过阈值时只发一封关机通知。
+### 处理方式：失败后延迟重试
+
+限流是暂时的，等一会儿就好。关机通知丢失的代价远大于多等 30 秒，因此应当重试而不是放弃：
+
+```bash
+attempt=1
+while :; do
+  if send_mail; then exit 0; fi
+  if [ "$attempt" -ge "$MAIL_MAX_ATTEMPTS" ]; then
+    logger -t traffic-guard "邮件发送失败，已尝试 ${attempt} 次"
+    exit 1
+  fi
+  sleep "$MAIL_RETRY_DELAY"
+  attempt=$((attempt + 1))
+done
+```
+
+默认 `MAIL_RETRY_DELAY=30`、`MAIL_MAX_ATTEMPTS=3`。
+
+### 关键陷阱：systemd 超时会杀掉重试
+
+如果这个发信脚本由 `Type=oneshot` 的 systemd 服务调用，**默认 `TimeoutStartSec=90s` 会在重试期间杀掉脚本**，导致后面的 `poweroff` 永远不执行——守卫彻底失效，比邮件发不出去严重得多。
+
+3 次尝试 × (连接超时 + 30 秒) 很容易超过 90 秒。必须显式放宽：
+
+```ini
+[Service]
+Type=oneshot
+TimeoutStartSec=300
+```
+
+这个坑静态检查查不出来，只有在真机上跑一次失败重试才能发现。
+
+### 不要去重到“只发一封”
+
+有人会想“既然会限流，那预警和关机就合并成一封”。但两者语义不同：预警是提醒你还有缓冲，关机是通知服务已中断。本项目选择的是——越过阈值时不再补发预警，只发关机通知；预警只在未越线时发。这样既避免连发，又不丢关键信息。
 
 ## 日志位置
 

@@ -86,19 +86,19 @@ TRAFFIC_GUARD_ACTION=none       # none = 只发通知不关机，便于先观察
 - **内核 6.14+/7.x 不能用 BCC 0.29 编译 BPF**：`BPF_LOAD_ACQ`、`BPF_STORE_REL`、`BPF_F_CPU`、`BPF_TRACE_FSESSION` 等新常量缺失。因此必须用 picosnitch 2.x 的预编译 CO-RE 对象，不要退回 1.x。
 - **`unattended-upgrades` 会持有 dpkg 锁**：安装脚本只在 apt 报锁冲突时重试；不能用 `pgrep unattended` 判断，因为 `unattended-upgrade-shutdown` 是常驻进程并不持锁。
 - **picosnitch 2.x 数据库结构与 1.x 不同**：`exe` 规范化到 `executables` 表，查询必须 JOIN。
-- **189 邮箱短时间连发会被限流**：返回 `535 authentication failed`，看起来像密码错误。越过阈值时不再补发预警邮件，只发一封关机通知。
+- **189 邮箱短时间连发会被限流**：返回 `535 authentication failed`，看起来像密码错误。发信失败会延迟 30 秒重试（最多 3 次）；`traffic-guard.service` 的 `TimeoutStartSec` 已放宽到 300 秒，否则重试期间 systemd 会杀掉脚本、`poweroff` 永不执行。
 
 ## 当前开发进度
 
-v0.0.11 已把两台服务器的阈值调整为 50 GB，并修复 CI 重部署会覆盖现场配置的严重隐患。详见 [docs/20261120-1522-当前开发进度-未标注.md](docs/20261120-1522-当前开发进度-未标注.md)。
+v0.0.12 已实现邮件失败后延迟重试（30 秒 × 3 次），并修复 systemd 超时会中断重试的连带问题。详见 [docs/20261120-1622-当前开发进度-未标注.md](docs/20261120-1622-当前开发进度-未标注.md)。
 
 ## 下一步待实现
 
-剩余待办（关机流程真机验证、50GB 计量口径核对、发信失败告警等）见 [docs/20261120-1522-下一步待实现-未标注.md](docs/20261120-1522-下一步待实现-未标注.md)。
+剩余待办（Ubuntu 26.10 升级、关机流程真机验证、50GB 计量口径核对、Bark 兜底等）见 [docs/20261120-1622-下一步待实现-未标注.md](docs/20261120-1622-下一步待实现-未标注.md)。
 
 ## 自动测试与部署
 
-每次 push 和 pull request 都会运行 Shell 语法、ShellCheck、流量守卫判定逻辑验证、Python 单元测试和编译检查。部署工作流默认关闭；配置仓库变量 `ENABLE_DEPLOY=true`，并添加以下 Secrets 后，`main` 分支 CI 成功会让服务器在 `/opt/linuxnet` 首次 clone 或拉取并重新部署：
+每次 push 和 pull request 都会运行 Shell 语法、ShellCheck、流量守卫判定逻辑验证、邮件重试验证、Python 单元测试和编译检查。部署工作流默认关闭；配置仓库变量 `ENABLE_DEPLOY=true`，并添加以下 Secrets 后，`main` 分支 CI 成功会让服务器在 `/opt/linuxnet` 首次 clone 或拉取并重新部署：
 
 - `DEPLOY_SERVER_HOST`
 - `DEPLOY_SERVER_USER`（可选，默认 `root`）
