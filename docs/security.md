@@ -8,6 +8,8 @@ Traffic Guard Web 即使只监听本机，也强制使用 Basic Auth。用户名
 
 该 Web 服务具有修改 `/etc/default/traffic-guard` 和启动检查服务的权限。检查服务可能执行关机，因此认证文件、反向代理配置和 SSH 访问权限都应按 root 级敏感度管理。
 
+邮件配置文件 `/etc/traffic-guard/gmail-notify.conf` 保存 SMTP 明文密码，权限 `0600`。写入时所有值用单引号包裹，避免密码中的 `#`、`(`、`!` 等字符被 shell 解析。
+
 ## 防护措施
 
 - 请求体上限为 16 KiB。
