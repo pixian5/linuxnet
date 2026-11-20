@@ -14,7 +14,9 @@ PICOSNITCH_VENV="${PICOSNITCH_VENV:-/opt/picosnitch-venv}"
 PICOSNITCH_VERSION="1.0.3"
 PICOSNITCH_DASH_VERSION="2.18.2"
 PLOTLY_VERSION="5.24.1"
-PANDAS_VERSION="2.0.3"
+# pandas 2.2.3 是最后一个同时提供 cp312 wheel 的稳定版本之一；Ubuntu 24.04 自带 Python 3.12，
+# 旧值 2.0.3 没有 cp312 wheel，会退化为源码编译并缺少编译环境而失败。
+PANDAS_VERSION="2.2.3"
 PICOSNITCH_DASH_HOST="${PICOSNITCH_DASH_HOST:-127.0.0.1}"
 PICOSNITCH_DASH_PORT="${PICOSNITCH_DASH_PORT:-5100}"
 TRAFFIC_GUARD_WEB_HOST="${TRAFFIC_GUARD_WEB_HOST:-127.0.0.1}"
@@ -89,9 +91,11 @@ install_picosnitch() {
   "$PICOSNITCH_VENV/bin/pip" install --upgrade \
     "dash==${PICOSNITCH_DASH_VERSION}" \
     "plotly==${PLOTLY_VERSION}" \
-    "pandas==${PANDAS_VERSION}"
+    "pandas==${PANDAS_VERSION}" \
+    psutil
   # 强制重装 picosnitch 本体，把上一次部署打过的补丁覆盖回上游原始文件。
   # 否则补丁脚本会因为目标字符串已被替换而报“命中 0 次”，导致二次部署失败。
+  # 注意必须 --no-deps，否则会把 dash/pandas/plotly 一起拖着重装；因此 psutil 在上一条命令显式安装。
   "$PICOSNITCH_VENV/bin/pip" install --upgrade --force-reinstall --no-deps \
     "picosnitch==${PICOSNITCH_VERSION}"
 }
