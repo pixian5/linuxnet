@@ -86,20 +86,20 @@ TRAFFIC_GUARD_ACTION=none       # none = 只发通知不关机，便于先观察
 - **内核 6.14+/7.x 不能用 BCC 0.29 编译 BPF**：`BPF_LOAD_ACQ`、`BPF_STORE_REL`、`BPF_F_CPU`、`BPF_TRACE_FSESSION` 等新常量缺失。因此必须用 picosnitch 2.x 的预编译 CO-RE 对象，不要退回 1.x。
 - **`unattended-upgrades` 会持有 dpkg 锁**：安装脚本只在 apt 报锁冲突时重试；不能用 `pgrep unattended` 判断，因为 `unattended-upgrade-shutdown` 是常驻进程并不持锁。
 - **picosnitch 2.x 数据库结构与 1.x 不同**：`exe` 规范化到 `executables` 表，查询必须 JOIN。
-- **189 邮箱短时间连发会被限流**：返回 `535 authentication failed`，看起来像密码错误。发信失败会延迟 30 秒重试（最多 3 次）；`traffic-guard.service` 的 `TimeoutStartSec` 已放宽到 300 秒，否则重试期间 systemd 会杀掉脚本、`poweroff` 永不执行。
+- **189 邮箱短时间连发会被限流**：返回 `535 authentication failed`，看起来像密码错误。发信失败会延迟 30 秒重试（最多 3 次尝试）；守卫对整次通知设限，120 秒请求终止，再过 5 秒强制结束仍未退出的发信进程。超时不阻断已配置的关机动作。
 - **Ubuntu 大版本升级会让 venv 失效**：24.04 的 Python 3.12 → 26.04/26.10 的 3.14，旧 venv 报 `No module named picosnitch` 并无限重启。安装脚本已能检测 `pyvenv.cfg` 版本差异并自动重建。
 
 ## 当前开发进度
 
-v0.0.13 已完成两台服务器从 Ubuntu 24.04 到 26.10 的升级（内核 7.3.0-1004-azure），并修复 Python 3.14 导致的 venv 失效。详见 [docs/20261120-1759-当前开发进度-未标注.md](docs/20261120-1759-当前开发进度-未标注.md)。
+v0.0.15 修复了部署工作流无法在禁用 root 直登的服务器上执行、凭据扫描误报文档占位符、启动标识缺失时静默失败、忽略文件阻断部署四个问题。本轮未轮换凭据、未重写历史、未在线部署。详见[当前开发进度](docs/20261120-2051-当前开发进度-ChatGPT.md)。
 
 ## 下一步待实现
 
-剩余待办（关机流程真机验证、50GB 计量口径核对、Bark 兜底等）见 [docs/20261120-1622-下一步待实现-未标注.md](docs/20261120-1622-下一步待实现-未标注.md)。
+优先轮换已泄露凭据并验证旧值失效，再安排测试机部署、重启计量和关机演练。详见[下一步待实现](docs/20261120-2051-下一步待实现-ChatGPT.md)。
 
 ## 自动测试与部署
 
-每次 push 和 pull request 都会运行 Shell 语法、ShellCheck、流量守卫判定逻辑验证、邮件重试验证、Python 单元测试和编译检查。部署工作流默认关闭；配置仓库变量 `ENABLE_DEPLOY=true`，并添加以下 Secrets 后，`main` 分支 CI 成功会让服务器在 `/opt/linuxnet` 首次 clone 或拉取并重新部署：
+推送和拉取请求会触发凭据检查、脚本静态检查、守卫和邮件验证、Python 单元测试及编译检查。部署默认关闭；配置 `ENABLE_DEPLOY=true` 和以下仓库密钥后，仅本仓库 `main` 推送通过 CI（持续集成）才可部署。服务器会核对 `/opt/linuxnet` 的来源、分支、工作区及提交；若远端 `main` 已前进，旧任务停止，不改部署为未经本次检查的版本：
 
 - `DEPLOY_SERVER_HOST`
 - `DEPLOY_SERVER_USER`（可选，默认 `root`）

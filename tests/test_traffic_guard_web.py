@@ -164,6 +164,31 @@ class TrafficGuardWebTests(unittest.TestCase):
         self.assertIn("WARN_PERCENT=80", text)
         self.assertEqual(web.read_env_file(self.config_path)["LIMIT_BYTES"], str(128 * 1024 * 1024))
 
+    def test_live_usage_matches_checker(self):
+        root = Path(self.temp_dir.name)
+        period = web.datetime.now().strftime("%Y-%m")
+        (root / "boot_id").write_text("boot-b\n", encoding="ascii")
+        for saved_period, saved_boot, current, expected in [
+            (period, "boot-a", 100, 1100),
+            (period, "boot-a", 800, 1800),
+            (period, "boot-b", 800, 1300),
+            (period, "boot-b", 100, 1000),
+            (period, "", 800, 1300),
+            ("2000-01", "boot-a", 800, 0),
+        ]:
+            with self.subTest(saved_period=saved_period, saved_boot=saved_boot, current=current):
+                (root / "baseline").write_text(
+                    f"PERIOD={saved_period}\nBOOT_ID={saved_boot}\nTOTAL_BYTES=1000\nLAST_COUNTER=500\nWARNED=1\n",
+                    encoding="ascii",
+                )
+                with mock.patch.object(web, "read_int", return_value=current), mock.patch.object(
+                    web, "BOOT_ID_FILE", root / "boot_id"
+                ):
+                    snapshot = web.collect_state()
+                self.assertEqual(snapshot["used"], expected)
+                self.assertEqual(snapshot["period"], period)
+                self.assertEqual(snapshot["warned"], saved_period == period)
+
     def test_state_accumulates_across_counter_reset(self):
         state_path = self.temp_dir.name + "/baseline"
         Path(state_path).write_text(

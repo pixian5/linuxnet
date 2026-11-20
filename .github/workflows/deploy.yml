@@ -16,6 +16,8 @@ jobs:
   deploy:
     if: >-
       ${{ github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_repository.full_name == github.repository &&
           github.event.workflow_run.head_branch == 'main' &&
           vars.ENABLE_DEPLOY == 'true' }}
     runs-on: ubuntu-latest
@@ -36,18 +38,39 @@ jobs:
         env:
           SERVER_HOST: ${{ secrets.DEPLOY_SERVER_HOST }}
           SERVER_USER: ${{ secrets.DEPLOY_SERVER_USER }}
+          CI_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
+          set -euo pipefail
+          [[ "$CI_SHA" =~ ^[a-f0-9]{40}$ && "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
           user="${SERVER_USER:-root}"
-          ssh "$user@$SERVER_HOST" 'bash -s' <<'REMOTE'
-          set -eu
-          if [ -e /opt/linuxnet ] && [ ! -d /opt/linuxnet/.git ]; then
-            echo "/opt/linuxnet 已存在但不是 Git 仓库" >&2
-            exit 1
+          ssh "$user@$SERVER_HOST" "bash -s -- '$CI_SHA' '$GITHUB_REPOSITORY'" <<'REMOTE'
+          set -euo pipefail
+          sha=$1
+          url="https://github.com/$2.git"
+          fail() { echo "$*" >&2; exit 1; }
+          dir=/opt/linuxnet
+          [[ ! -L "$dir" ]] || fail "部署路径是符号链接"
+          if [[ ! -e "$dir" ]]; then
+            git clone --branch main --single-branch "$url" "$dir"
           fi
-          if [ ! -d /opt/linuxnet/.git ]; then
-            git clone https://github.com/pixian5/linuxnet.git /opt/linuxnet
-          fi
-          cd /opt/linuxnet
-          git pull --ff-only origin main
-          bash scripts/install_linuxnet_stack.sh
+          [[ -d "$dir/.git" ]] || fail "部署目录不是独立仓库"
+          cd "$dir"
+          [[ "$(git remote get-url origin)" == "$url" ]] || fail "部署目录来源不符"
+          [[ "$(git symbolic-ref --short HEAD)" == main ]] || fail "部署目录不在 main 分支"
+          clean_tree() {
+            local changes
+            # 只看未跟踪的非忽略文件；__pycache__、.DS_Store 等被忽略的产物不应阻断部署
+            changes=$(git status --porcelain --untracked-files=normal) || return 1
+            [[ -z "$changes" ]] || fail "部署目录有本地文件或改动，未覆盖"
+          }
+          clean_tree
+          git fetch origin refs/heads/main
+          [[ "$(git rev-parse FETCH_HEAD)" == "$sha" ]] || fail "main 已更新，本次 CI 提交不再部署"
+          git merge-base --is-ancestor HEAD "$sha" || fail "部署目录含本地提交，未覆盖"
+          git merge --ff-only "$sha"
+          clean_tree
+          [[ "$(git rev-parse HEAD)" == "$sha" ]] || fail "待执行版本与 CI 提交不一致"
+          # 安装脚本要求 root；云镜像通常禁用 root 直接登录，只能用普通用户 + 免密 sudo
+          sudo -n true 2>/dev/null || fail "部署用户缺少免密 sudo，无法执行安装"
+          sudo -n bash scripts/install_linuxnet_stack.sh
           REMOTE

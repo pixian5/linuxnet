@@ -16,6 +16,14 @@ echo "MAIL $*" >> "$MAIL_LOG"
 EOF
 chmod +x "$FAKE_MAIL"
 export MAIL_LOG
+export BOOT_ID_FILE="$WORK/boot_id"
+printf 'boot-a\n' > "$BOOT_ID_FILE"
+# 日志与关机动作都限制在测试临时目录
+printf '#!/bin/sh\nexit 0\n' > "$WORK/logger"
+printf '#!/bin/sh\necho poweroff >> "$MAIL_LOG"\n' > "$WORK/fake-poweroff"
+chmod +x "$WORK/logger" "$WORK/fake-poweroff"
+export POWEROFF_CMD="$WORK/fake-poweroff"
+export PATH="$WORK:$PATH"
 
 pass=0
 fail=0
@@ -66,13 +74,13 @@ LIMIT_BYTES=$LIMIT ACTION=none WARN_PERCENT=80 run
 check "累计 10MiB" 10485760 "$(get TOTAL_BYTES)"
 check "不发邮件" 0 "$(mail_count warning)"
 
-echo "场景 3：模拟重启导致计数器回绕（当前值变小）"
+echo "场景 3：同次启动内网卡计数器回绕（当前值变小）"
 echo 3000000 > "$FAKE_TX"
 LIMIT_BYTES=$LIMIT ACTION=none WARN_PERCENT=80 run
 check "累计值保留" 10485760 "$(get TOTAL_BYTES)"
 check "计数器基线已对齐" 3000000 "$(get LAST_COUNTER)"
 
-echo "场景 4：重启后再增长 5 MiB，累计应为 15 MiB"
+echo "场景 4：回绕后再增长 5 MiB，累计应为 15 MiB"
 echo $((3000000 + 5242880)) > "$FAKE_TX"
 LIMIT_BYTES=$LIMIT ACTION=none WARN_PERCENT=80 run
 check "累计 15MiB" $((10485760 + 5242880)) "$(get TOTAL_BYTES)"
@@ -118,6 +126,43 @@ check "从旧基线起算 2MB" 2000000 "$(get TOTAL_BYTES)"
 echo "场景 9：阈值与计数器非法时退出码为 1"
 LIMIT_BYTES=0 ACTION=none run
 check "零阈值被拒绝" 1 $?
+
+echo "场景 10：网卡消失时失败，不更新状态"
+before="$(cksum < "$STATE")"
+rm "$FAKE_TX"
+ACTION=none run
+check "丢失计数器返回非零" 1 $?
+check "状态文件保持不变" "$before" "$(cksum < "$STATE")"
+
+echo "场景 11：同月跨启动计入完整新计数，不受大小关系影响"
+printf 'boot-b\n' > "$BOOT_ID_FILE"
+echo 300 > "$FAKE_TX"
+ACTION=none run
+check "新计数较小时全部计入" 2000300 "$(get TOTAL_BYTES)"
+printf 'boot-c\n' > "$BOOT_ID_FILE"
+echo 900 > "$FAKE_TX"
+ACTION=none run
+check "新计数较大时全部计入" 2001200 "$(get TOTAL_BYTES)"
+check "持久化启动标识" boot-c "$(get BOOT_ID)"
+ACTION=none run
+check "同次启动不重复计入" 2001200 "$(get TOTAL_BYTES)"
+
+echo "场景 12：模拟邮件整步超时，仍执行假关机程序"
+cat > "$WORK/timeout" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$MAIL_LOG"
+exit 124
+EOF
+chmod +x "$WORK/timeout"
+LIMIT_BYTES=100 ACTION=poweroff run
+check "超时不影响策略退出码" 0 $?
+check "整步期限和强杀宽限均已传入" 1 "$(grep -Fc -- "-k 5s 120s $FAKE_MAIL shutdown" "$MAIL_LOG")"
+check "假关机被执行一次" 1 "$(grep -cx poweroff "$MAIL_LOG")"
+
+echo "场景 13：启动标识不可读时失败并记录，不静默退出"
+# 临时指向不存在的路径，模拟 /proc 未挂载
+BOOT_ID_FILE="$WORK/no-such-boot-id" ACTION=none run
+check "缺失启动标识返回非零" 1 $?
 
 echo
 echo "结果：$pass 通过，$fail 失败"

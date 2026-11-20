@@ -12,6 +12,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 检查新增提交内容及说明，不输出匹配文本
+        if: github.event.deleted != true
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [[ "$EVENT" == pull_request ]]; then
+            base=$PR_BASE; tip=$PR_HEAD
+          elif [[ "$BEFORE" =~ ^0+$ ]]; then
+            tip=$AFTER
+            # 新分支不能把默认分支的旧历史作为本次新增；首次默认分支推送除外。
+            if [[ "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]]; then
+              base=ROOT
+            else
+              base="refs/remotes/origin/$DEFAULT_BRANCH"
+            fi
+          else
+            base=$BEFORE; tip=$AFTER
+          fi
+          python3 scripts/check_secrets.py --range "$base" "$tip"
       - name: 安装静态检查工具
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: 检查 Shell 脚本

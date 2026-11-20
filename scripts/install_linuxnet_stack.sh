@@ -107,6 +107,14 @@ validate_inputs() {
   [[ "$PICOSNITCH_WEB_PORT" =~ ^[0-9]+$ && "$PICOSNITCH_WEB_PORT" -ge 1 && "$PICOSNITCH_WEB_PORT" -le 65535 ]] || { echo "PICOSNITCH_WEB_PORT 无效"; exit 1; }
   [[ "$TRAFFIC_GUARD_WEB_PORT" =~ ^[0-9]+$ && "$TRAFFIC_GUARD_WEB_PORT" -ge 1 && "$TRAFFIC_GUARD_WEB_PORT" -le 65535 ]] || { echo "TRAFFIC_GUARD_WEB_PORT 无效"; exit 1; }
   [[ "$TRAFFIC_GUARD_IFACE" =~ ^[A-Za-z0-9_.:-]+$ ]] || { echo "TRAFFIC_GUARD_IFACE 包含非法字符"; exit 1; }
+  # 在安装软件、写配置、重启服务前验证现场网卡；计数值可能超过有符号整数范围。
+  local counter value
+  for counter in tx_bytes rx_bytes; do
+    if ! IFS= read -r value < "/sys/class/net/$TRAFFIC_GUARD_IFACE/statistics/$counter" || ! [[ "$value" =~ ^[0-9]+$ ]]; then
+      echo "网卡 $TRAFFIC_GUARD_IFACE 的 $counter 无法读取或不是非负整数，停止安装" >&2
+      exit 1
+    fi
+  done
   [[ "$TRAFFIC_GUARD_LIMIT_MIB" =~ ^[1-9][0-9]*$ && "$TRAFFIC_GUARD_LIMIT_MIB" -le 8796093022207 ]] || { echo "TRAFFIC_GUARD_LIMIT_MIB 必须是有效正整数"; exit 1; }
   [[ "$TRAFFIC_GUARD_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]] || { echo "TRAFFIC_GUARD_INTERVAL_SECONDS 必须是正整数"; exit 1; }
   [[ "$TRAFFIC_GUARD_WARN_PERCENT" =~ ^[0-9]{1,2}$ && "$TRAFFIC_GUARD_WARN_PERCENT" -le 99 ]] || { echo "TRAFFIC_GUARD_WARN_PERCENT 必须是 0-99 的整数（0 表示关闭预警）"; exit 1; }
@@ -470,20 +478,48 @@ for name, request in checks:
     else:
         raise SystemExit(f"{name} 健康检查失败：{last_error}")
 PY
-  # 确认 picosnitch 真的加载了 BPF 并写入采集数据，避免“服务 active 但实际没工作”
-  local deadline=$((SECONDS + 60))
-  while [ "$SECONDS" -lt "$deadline" ]; do
-    if [ -s "$PICOSNITCH_DB" ] && [ "$(sqlite3 "$PICOSNITCH_DB" 'SELECT count(*) FROM connections;' 2>/dev/null || echo 0)" -gt 0 ]; then
-      log "Picosnitch 已采集到连接记录"
-      break
-    fi
-    sleep 3
-  done
-  if [ ! -s "$PICOSNITCH_DB" ]; then
-    echo "Picosnitch 数据库未生成：$PICOSNITCH_DB"
-    systemctl status picosnitch.service --no-pager -l | head -20
-    exit 1
-  fi
+  log "验证 Picosnitch 是否采集本次回环 TCP 连接"
+  /usr/bin/python3 - "$PICOSNITCH_DB" <<'PY'
+import socket
+import sqlite3
+import sys
+import time
+from pathlib import Path
+
+# 固定版本 2.2.1 的地址是外键，contime 为 Unix 秒。只读打开，不能误建空库。
+uri = Path(sys.argv[1]).as_uri() + "?mode=ro"
+with sqlite3.connect(uri, uri=True, timeout=2) as db:
+    baseline, = db.execute("SELECT COALESCE(MAX(rowid), 0) FROM connections").fetchone()
+    with socket.socket() as server, socket.socket() as client:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        started = int(time.time())
+        client.settimeout(3)
+        client.connect(server.getsockname())
+        local_port = client.getsockname()[1]
+        remote_port = server.getsockname()[1]
+        peer, _ = server.accept()
+        with peer:
+            # 保留端口并定期产生流量，覆盖服务启动和批量落库时间。
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                client.sendall(b"x")
+                if peer.recv(1) != b"x":
+                    raise SystemExit("回环探针传输失败")
+                row = db.execute('''SELECT c.rowid FROM connections AS c
+                    JOIN addresses AS l ON l.id = c.laddr_id
+                    JOIN addresses AS r ON r.id = c.raddr_id
+                    WHERE c.rowid > ? AND c.contime >= ? AND c.family = ? AND c.protocol = ?
+                      AND c.lport = ? AND c.rport = ? AND c.send > 0
+                      AND l.addr = '127.0.0.1' AND r.addr = '127.0.0.1' LIMIT 1''',
+                    (baseline, started, socket.AF_INET, socket.IPPROTO_TCP, local_port, remote_port)).fetchone()
+                if row:
+                    print(f"[linuxnet] 已验证本次探针 {local_port} -> {remote_port}，连接记录 {row[0]}")
+                    break
+                time.sleep(2)
+            else:
+                raise SystemExit(f"采集验收超时：未找到本次回环连接 {local_port} -> {remote_port}")
+PY
   # 桌面通知相关错误只在无图形环境时出现，记录但不阻断
   if [ -s /var/log/picosnitch/error.log ]; then
     log "Picosnitch 错误日志（前 5 行）："

@@ -6,7 +6,8 @@ LIMIT_BYTES="${LIMIT_BYTES:-1073741824}"
 ACTION="${ACTION:-poweroff}"
 WARN_PERCENT="${WARN_PERCENT:-80}"
 STATE_FILE="${STATE_FILE:-/var/lib/traffic-guard/${IFACE}.baseline}"
-# TX_FILE 与 MAIL_SCRIPT 允许覆盖，仅用于本地测试
+# 可替换内核输入和外部程序，以便隔离测试
+BOOT_ID_FILE="${BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
 TX_FILE="${TX_FILE:-/sys/class/net/${IFACE}/statistics/tx_bytes}"
 MAIL_SCRIPT="${MAIL_SCRIPT:-/usr/local/lib/traffic-guard/send-shutdown-mail.sh}"
 PERIOD="$(date +%Y-%m)"
@@ -17,9 +18,15 @@ is_uint() {
 
 if [ ! -r "$TX_FILE" ]; then
   logger -t traffic-guard "网卡 ${IFACE} 不存在，跳过本次检查"
-  exit 0
+  exit 1
 fi
 
+# 启动标识读不到时不能让 set -e 直接退出，否则下面的日志永远不会输出
+boot_id="$(cat "$BOOT_ID_FILE" 2>/dev/null || true)"
+if [ -z "$boot_id" ]; then
+  logger -t traffic-guard "无法读取启动标识 ${BOOT_ID_FILE}，拒绝更新流量基线"
+  exit 1
+fi
 current="$(cat "$TX_FILE")"
 if ! is_uint "$current" || ! is_uint "$LIMIT_BYTES" || [ "$LIMIT_BYTES" -le 0 ]; then
   logger -t traffic-guard "计数器或阈值非法，跳过本次检查"
@@ -28,6 +35,7 @@ fi
 
 # 状态文件记录：本周期累计出站流量、上次看到的内核计数器、周期、预警/超限通知标记
 state_period=""
+state_boot_id=""
 total=0
 last=""
 warned=0
@@ -44,6 +52,7 @@ if [ -f "$STATE_FILE" ]; then
     key="${line%%=*}"
     value="${line#*=}"
     case "$key" in
+      BOOT_ID) state_boot_id="$value" ;;
       PERIOD) state_period="$value" ;;
       TOTAL_BYTES) is_uint "$value" && total="$value" ;;
       LAST_COUNTER) is_uint "$value" && last="$value" ;;
@@ -71,8 +80,12 @@ elif [ -z "$last" ]; then
   last="$current"
   warned=0
   alerted=0
+elif [ -n "$state_boot_id" ] && [ "$state_boot_id" != "$boot_id" ]; then
+  # 同月重启后，当前启动的全部出站字节均未计入旧累计
+  last=0
+  logger -t traffic-guard "检测到新的启动，计入本次启动的 ${current} bytes"
 elif [ "$current" -lt "$last" ]; then
-  # 重启或网卡重置导致内核计数器回绕：保留已累计值，不把回绕差值计入
+  # 同次启动或旧状态缺少启动标识：保留既有回绕策略
   last="$current"
   logger -t traffic-guard "检测到计数器回绕，保留已累计出站流量 ${total} bytes"
 fi
@@ -84,8 +97,8 @@ total="$used"
 write_state() {
   local tmp
   tmp="$(mktemp "${STATE_FILE}.XXXXXX")"
-  printf 'PERIOD=%s\nTOTAL_BYTES=%s\nLAST_COUNTER=%s\nWARNED=%s\nALERTED=%s\n' \
-    "$PERIOD" "$total" "$current" "$warned" "$alerted" > "$tmp"
+  printf 'PERIOD=%s\nBOOT_ID=%s\nTOTAL_BYTES=%s\nLAST_COUNTER=%s\nWARNED=%s\nALERTED=%s\n' \
+    "$PERIOD" "$boot_id" "$total" "$current" "$warned" "$alerted" > "$tmp"
   chmod 600 "$tmp"
   mv -f "$tmp" "$STATE_FILE"
 }
@@ -115,9 +128,15 @@ fi
 
 write_state
 
+# 对整个发信步骤（含重试）限时，强制终止后仍继续原有动作
+send_mail() {
+  timeout -k 5s 120s "$MAIL_SCRIPT" "$@" ||
+    logger -t traffic-guard "${1} 邮件发送失败或超时（退出码 $?），继续执行既定策略" || true
+}
+
 if [ "$should_warn" -eq 1 ]; then
   logger -t traffic-guard "出站流量已达预警线 ${WARN_PERCENT}%（${used}/${LIMIT_BYTES} bytes）"
-  "$MAIL_SCRIPT" warning "$used" "$LIMIT_BYTES" "$WARN_PERCENT" || true
+  send_mail warning "$used" "$LIMIT_BYTES" "$WARN_PERCENT"
 fi
 
 if [ "$over_limit" -eq 0 ]; then
@@ -127,12 +146,12 @@ fi
 logger -t traffic-guard "网卡 ${IFACE} 出站流量达到阈值 ${used} bytes（阈值 ${LIMIT_BYTES}），action=${ACTION}"
 # 已通知过就不再重复发信，避免 ACTION=none 时每轮刷邮箱
 if [ "$should_alert" -eq 1 ]; then
-  "$MAIL_SCRIPT" shutdown "$used" "$LIMIT_BYTES" || true
+  send_mail shutdown "$used" "$LIMIT_BYTES"
 fi
 
 case "$ACTION" in
   poweroff)
-    /sbin/poweroff
+    "${POWEROFF_CMD:-/sbin/poweroff}"
     ;;
   halt)
     /sbin/halt

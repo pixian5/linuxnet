@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 
 CONFIG_FILE = "/etc/default/traffic-guard"
+BOOT_ID_FILE = "/proc/sys/kernel/random/boot_id"
 DEFAULTS = {
     "IFACE": "eth0",
     "LIMIT_BYTES": str(1024 * 1024 * 1024),
@@ -76,10 +77,10 @@ def write_env_file(path, data):
 def read_state(path):
     """读取流量守卫状态文件。
 
-    新格式为 KEY=VALUE 多行（PERIOD/TOTAL_BYTES/LAST_COUNTER/WARNED/ALERTED），
+    新格式为 KEY=VALUE 多行（PERIOD/BOOT_ID/TOTAL_BYTES/LAST_COUNTER/WARNED/ALERTED），
     旧格式是单行整数（只记录内核计数器基线）。两种格式都兼容，无法解析的字段保持 None。
     """
-    state = {"period": "", "total": None, "last_counter": None, "warned": False, "alerted": False}
+    state = {"period": "", "boot_id": "", "total": None, "last_counter": None, "warned": False, "alerted": False}
     try:
         with open(path, "r", encoding="utf-8") as fh:
             content = fh.read()
@@ -103,6 +104,8 @@ def read_state(path):
         value = value.strip()
         if key == "PERIOD":
             state["period"] = value
+        elif key == "BOOT_ID":
+            state["boot_id"] = value
         elif key in ("TOTAL_BYTES", "LAST_COUNTER"):
             try:
                 state["total" if key == "TOTAL_BYTES" else "last_counter"] = int(value)
@@ -166,13 +169,25 @@ def collect_state(message="", error=""):
     tx_file = f"/sys/class/net/{iface}/statistics/tx_bytes"
     current = read_int(tx_file)
     state = read_state(state_file)
-    # 已用量 = 本周期累计 + 本次开机以来新增（内核计数器从 LAST_COUNTER 增长的部分）
+    now = datetime.now()
+    period = now.strftime("%Y-%m")
+    new_period = (state["period"] or (period if state["last_counter"] is not None else "")) != period
     used = None
-    if state["total"] is not None and current is not None and state["last_counter"] is not None:
-        delta = current - state["last_counter"]
-        used = max(state["total"] + max(delta, 0), 0)
-    elif current is not None and state["last_counter"] is not None:
-        used = max(current - state["last_counter"], 0)
+    if current is not None:
+        if new_period:
+            used = 0
+        else:
+            try:
+                with open(BOOT_ID_FILE, encoding="ascii") as fh:
+                    boot_id = fh.read().strip()
+            except OSError:
+                boot_id = ""
+            if boot_id:
+                # 与检查脚本一致：换启动全计，无旧启动标识时沿用差值策略
+                last = state["last_counter"]
+                if last is not None and state["boot_id"] and boot_id != state["boot_id"]:
+                    last = 0
+                used = (state["total"] or 0) + (max(current - last, 0) if last is not None else 0)
     remaining = None if used is None else max(limit - used, 0)
     percent = None if used is None or limit <= 0 else min(used / limit * 100, 100)
     _, timer_active = run_command(["systemctl", "is-active", "traffic-guard.timer"])
@@ -180,14 +195,14 @@ def collect_state(message="", error=""):
     _, service_result = run_command(["systemctl", "show", "traffic-guard.service", "-p", "Result", "--value"])
     _, timer_substate = run_command(["systemctl", "show", "traffic-guard.timer", "-p", "SubState", "--value"])
     return {
-        "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "now": now.strftime("%Y-%m-%d %H:%M:%S"),
         "iface": iface,
         "limit": limit,
         "limit_mib": max(limit // (1024 * 1024), 1),
         "action": config["ACTION"],
         "warn_percent": warn_percent,
-        "period": state["period"] or "未记录",
-        "warned": state["warned"],
+        "period": period,
+        "warned": state["warned"] and not new_period,
         "state_file": state_file,
         "current": current,
         "last_counter": state["last_counter"],
