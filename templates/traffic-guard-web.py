@@ -18,9 +18,12 @@ DEFAULTS = {
     "IFACE": "eth0",
     "LIMIT_BYTES": str(1024 * 1024 * 1024),
     "ACTION": "poweroff",
+    "WARN_PERCENT": "80",
     "STATE_FILE": "/var/lib/traffic-guard/eth0.baseline",
     "WEB_TOKEN_FILE": "/etc/traffic-guard/web-token",
 }
+# 写回配置时保持这个顺序，其余未知键原样追加，避免抹掉管理员手工加的变量
+CONFIG_KEY_ORDER = ["IFACE", "LIMIT_BYTES", "ACTION", "WARN_PERCENT", "STATE_FILE", "WEB_TOKEN_FILE"]
 MAX_BODY_BYTES = 16 * 1024
 MAX_WORKERS = 32
 SOCKET_TIMEOUT_SECONDS = 5
@@ -45,13 +48,14 @@ def read_env_file(path):
 
 
 def write_env_file(path, data):
-    lines = [
-        f"IFACE={data['IFACE']}",
-        f"LIMIT_BYTES={data['LIMIT_BYTES']}",
-        f"ACTION={data['ACTION']}",
-        f"STATE_FILE={data['STATE_FILE']}",
-        f"WEB_TOKEN_FILE={data['WEB_TOKEN_FILE']}",
-    ]
+    lines = []
+    for key in CONFIG_KEY_ORDER:
+        if key in data:
+            lines.append(f"{key}={data[key]}")
+    # 保留安装脚本或管理员写入的其它键，避免保存阈值时静默丢失
+    for key in sorted(data):
+        if key not in CONFIG_KEY_ORDER:
+            lines.append(f"{key}={data[key]}")
     directory = os.path.dirname(path) or "."
     fd, temp_path = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", dir=directory, text=True)
     try:
@@ -67,6 +71,48 @@ def write_env_file(path, data):
         except FileNotFoundError:
             pass
         raise
+
+
+def read_state(path):
+    """读取流量守卫状态文件。
+
+    新格式为 KEY=VALUE 多行（PERIOD/TOTAL_BYTES/LAST_COUNTER/WARNED/ALERTED），
+    旧格式是单行整数（只记录内核计数器基线）。两种格式都兼容，无法解析的字段保持 None。
+    """
+    state = {"period": "", "total": None, "last_counter": None, "warned": False, "alerted": False}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            content = fh.read()
+    except OSError:
+        return state
+    text = content.strip()
+    if not text:
+        return state
+    if "=" not in text:
+        try:
+            state["last_counter"] = int(text)
+        except ValueError:
+            return state
+        return state
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if key == "PERIOD":
+            state["period"] = value
+        elif key in ("TOTAL_BYTES", "LAST_COUNTER"):
+            try:
+                state["total" if key == "TOTAL_BYTES" else "last_counter"] = int(value)
+            except ValueError:
+                continue
+        elif key == "WARNED":
+            state["warned"] = value == "1"
+        elif key == "ALERTED":
+            state["alerted"] = value == "1"
+    return state
 
 
 def read_int(path):
@@ -110,11 +156,23 @@ def collect_state(message="", error=""):
         raise ConfigError("LIMIT_BYTES 配置无效") from exc
     if limit <= 0 or limit > MAX_LIMIT_MIB * 1024 * 1024:
         raise ConfigError("LIMIT_BYTES 超出有效范围")
+    try:
+        warn_percent = int(config.get("WARN_PERCENT", 80))
+    except (TypeError, ValueError):
+        warn_percent = 0
+    if warn_percent < 0 or warn_percent >= 100:
+        warn_percent = 0
     state_file = config["STATE_FILE"]
     tx_file = f"/sys/class/net/{iface}/statistics/tx_bytes"
     current = read_int(tx_file)
-    baseline = read_int(state_file)
-    used = None if current is None or baseline is None else max(current - baseline, 0)
+    state = read_state(state_file)
+    # 已用量 = 本周期累计 + 本次开机以来新增（内核计数器从 LAST_COUNTER 增长的部分）
+    used = None
+    if state["total"] is not None and current is not None and state["last_counter"] is not None:
+        delta = current - state["last_counter"]
+        used = max(state["total"] + max(delta, 0), 0)
+    elif current is not None and state["last_counter"] is not None:
+        used = max(current - state["last_counter"], 0)
     remaining = None if used is None else max(limit - used, 0)
     percent = None if used is None or limit <= 0 else min(used / limit * 100, 100)
     _, timer_active = run_command(["systemctl", "is-active", "traffic-guard.timer"])
@@ -127,9 +185,12 @@ def collect_state(message="", error=""):
         "limit": limit,
         "limit_mib": max(limit // (1024 * 1024), 1),
         "action": config["ACTION"],
+        "warn_percent": warn_percent,
+        "period": state["period"] or "未记录",
+        "warned": state["warned"],
         "state_file": state_file,
         "current": current,
-        "baseline": baseline,
+        "last_counter": state["last_counter"],
         "used": used,
         "remaining": remaining,
         "percent": percent,
@@ -275,13 +336,13 @@ button:hover {{ filter:brightness(1.08); }}
   <div class=\"grid\">
     <div class=\"card\"><div class=\"label\">网卡</div><div class=\"value\">{html.escape(data['iface'])}</div><div class=\"sub\">更新时间 {html.escape(data['now'])}</div></div>
     <div class=\"card\"><div class=\"label\">阈值</div><div class=\"value\">{format_bytes(data['limit'])}</div><div class=\"sub\">原始值 {data['limit']} bytes</div></div>
-    <div class=\"card\"><div class=\"label\">已用出站</div><div class=\"value\">{format_bytes(data['used'])}</div><div class=\"sub\">从基线开始累计</div></div>
+    <div class=\"card\"><div class=\"label\">已用出站</div><div class=\"value\">{format_bytes(data['used'])}</div><div class=\"sub\">统计周期 {html.escape(data['period'])}</div></div>
     <div class=\"card\"><div class=\"label\">剩余流量</div><div class=\"value\">{format_bytes(data['remaining'])}</div><div class=\"sub\">当前 tx_bytes {format_bytes(data['current'])}</div></div>
   </div>
   <div class=\"card\" style=\"margin-bottom:18px;\">
     <div class=\"label\">使用进度</div>
     <div class=\"value\">{percent:.2f}%</div>
-    <div class=\"sub\">基线文件: {html.escape(data['state_file'])} | baseline={data['baseline'] if data['baseline'] is not None else 'N/A'}</div>
+    <div class=\"sub\">预警线 {data['warn_percent']}%（已发送 {data['warned']}） | 状态文件: {html.escape(data['state_file'])} | 上次计数器={data['last_counter'] if data['last_counter'] is not None else 'N/A'}</div>
     <div class=\"bar\"><div class=\"fill\"></div></div>
   </div>
   <div class=\"grid\">

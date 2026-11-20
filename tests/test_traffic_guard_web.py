@@ -140,6 +140,45 @@ class TrafficGuardWebTests(unittest.TestCase):
         headers = {"Authorization": self.auth_header()}
         self.assertEqual(self.request("GET", "/", headers=headers)[0], 500)
 
+    def test_write_env_file_keeps_unknown_keys(self):
+        self.config_path.write_text(
+            "\n".join(
+                [
+                    "IFACE=eth0",
+                    "LIMIT_BYTES=1073741824",
+                    "ACTION=poweroff",
+                    "WARN_PERCENT=80",
+                    f"STATE_FILE={self.temp_dir.name}/baseline",
+                    f"WEB_TOKEN_FILE={self.token_path}",
+                    "EXTRA_FLAG=keep-me",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = web.read_env_file(self.config_path)
+        config["LIMIT_BYTES"] = str(128 * 1024 * 1024)
+        web.write_env_file(self.config_path, config)
+        text = self.config_path.read_text(encoding="utf-8")
+        self.assertIn("EXTRA_FLAG=keep-me", text)
+        self.assertIn("WARN_PERCENT=80", text)
+        self.assertEqual(web.read_env_file(self.config_path)["LIMIT_BYTES"], str(128 * 1024 * 1024))
+
+    def test_state_accumulates_across_counter_reset(self):
+        state_path = self.temp_dir.name + "/baseline"
+        Path(state_path).write_text(
+            "PERIOD=2026-11\nTOTAL_BYTES=1000\nLAST_COUNTER=500\nWARNED=0\nALERTED=0\n",
+            encoding="utf-8",
+        )
+        state = web.read_state(state_path)
+        self.assertEqual(state["total"], 1000)
+        self.assertEqual(state["last_counter"], 500)
+        self.assertFalse(state["warned"])
+        Path(state_path).write_text("600\n", encoding="utf-8")
+        legacy = web.read_state(state_path)
+        self.assertIsNone(legacy["total"])
+        self.assertEqual(legacy["last_counter"], 600)
+
 
 if __name__ == "__main__":
     unittest.main()

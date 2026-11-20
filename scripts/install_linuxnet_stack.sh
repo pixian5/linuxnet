@@ -22,6 +22,7 @@ TRAFFIC_GUARD_WEB_PORT="${TRAFFIC_GUARD_WEB_PORT:-5101}"
 TRAFFIC_GUARD_IFACE="${TRAFFIC_GUARD_IFACE:-eth0}"
 TRAFFIC_GUARD_LIMIT_MIB="${TRAFFIC_GUARD_LIMIT_MIB:-1024}"
 TRAFFIC_GUARD_ACTION="${TRAFFIC_GUARD_ACTION:-poweroff}"
+TRAFFIC_GUARD_WARN_PERCENT="${TRAFFIC_GUARD_WARN_PERCENT:-80}"
 TRAFFIC_GUARD_INTERVAL_SECONDS="${TRAFFIC_GUARD_INTERVAL_SECONDS:-10}"
 ENABLE_GMAIL_NOTIFY="${ENABLE_GMAIL_NOTIFY:-0}"
 
@@ -50,7 +51,9 @@ validate_inputs() {
   [[ "$TRAFFIC_GUARD_IFACE" =~ ^[A-Za-z0-9_.:-]+$ ]] || { echo "TRAFFIC_GUARD_IFACE 包含非法字符"; exit 1; }
   [[ "$TRAFFIC_GUARD_LIMIT_MIB" =~ ^[1-9][0-9]*$ && "$TRAFFIC_GUARD_LIMIT_MIB" -le 8796093022207 ]] || { echo "TRAFFIC_GUARD_LIMIT_MIB 必须是有效正整数"; exit 1; }
   [[ "$TRAFFIC_GUARD_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]] || { echo "TRAFFIC_GUARD_INTERVAL_SECONDS 必须是正整数"; exit 1; }
-  case "$TRAFFIC_GUARD_ACTION" in poweroff|halt) ;; *) echo "TRAFFIC_GUARD_ACTION 只能是 poweroff 或 halt"; exit 1 ;; esac
+  [[ "$TRAFFIC_GUARD_WARN_PERCENT" =~ ^[0-9]{1,2}$ && "$TRAFFIC_GUARD_WARN_PERCENT" -le 99 ]] || { echo "TRAFFIC_GUARD_WARN_PERCENT 必须是 0-99 的整数（0 表示关闭预警）"; exit 1; }
+  # none 表示只发邮件不关机，便于先观察一段时间再启用关机
+  case "$TRAFFIC_GUARD_ACTION" in poweroff|halt|none) ;; *) echo "TRAFFIC_GUARD_ACTION 只能是 poweroff、halt 或 none"; exit 1 ;; esac
 }
 
 log() {
@@ -86,7 +89,10 @@ install_picosnitch() {
   "$PICOSNITCH_VENV/bin/pip" install --upgrade \
     "dash==${PICOSNITCH_DASH_VERSION}" \
     "plotly==${PLOTLY_VERSION}" \
-    "pandas==${PANDAS_VERSION}" \
+    "pandas==${PANDAS_VERSION}"
+  # 强制重装 picosnitch 本体，把上一次部署打过的补丁覆盖回上游原始文件。
+  # 否则补丁脚本会因为目标字符串已被替换而报“命中 0 次”，导致二次部署失败。
+  "$PICOSNITCH_VENV/bin/pip" install --upgrade --force-reinstall --no-deps \
     "picosnitch==${PICOSNITCH_VERSION}"
 }
 
@@ -124,13 +130,21 @@ replacements = [
     ('"exe": "Executable"', '"exe": "可执行文件"', 1),
     ('{"label": "Auto-Refresh (10 minutes)", "value": 600},\n                    ],\n                    value=0,', '{"label": "Auto-Refresh (10 minutes)", "value": 600},\n                    ],\n                    value=30,', 1),
 ]
+changed = False
 for old, new, expected in replacements:
-    count = text.count(old)
-    if count != expected:
-        raise SystemExit(f"Picosnitch {path.name} 补丁不兼容：期望命中 {expected} 次，实际 {count} 次：{old[:60]}")
-    text = text.replace(old, new)
+    old_count = text.count(old)
+    new_count = text.count(new)
+    if old_count == expected:
+        text = text.replace(old, new)
+        changed = True
+        continue
+    # 已经打过补丁：目标字符串为 0 次且替换后字符串正好为期望次数，视为幂等通过
+    if old_count == 0 and new_count >= expected:
+        continue
+    raise SystemExit(f"Picosnitch {path.name} 补丁不兼容：期望命中 {expected} 次，实际 {old_count} 次：{old[:60]}")
 
-path.write_text(text, encoding="utf-8")
+if changed:
+    path.write_text(text, encoding="utf-8")
 PY
 }
 
@@ -201,6 +215,7 @@ write_traffic_guard_files() {
 IFACE=${TRAFFIC_GUARD_IFACE}
 LIMIT_BYTES=$((TRAFFIC_GUARD_LIMIT_MIB * 1024 * 1024))
 ACTION=${TRAFFIC_GUARD_ACTION}
+WARN_PERCENT=${TRAFFIC_GUARD_WARN_PERCENT}
 STATE_FILE=/var/lib/traffic-guard/${TRAFFIC_GUARD_IFACE}.baseline
 WEB_TOKEN_FILE=/etc/traffic-guard/web-token
 EOF

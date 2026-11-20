@@ -9,9 +9,20 @@ DB_PATH="/root/.config/picosnitch/snitch.db"
 # shellcheck disable=SC1090
 source "$CONF"
 
-used_bytes="${1:-0}"
-limit_bytes="${2:-0}"
+used_bytes="${2:-0}"
+limit_bytes="${3:-0}"
+warn_percent="${4:-0}"
 DRY_RUN="${DRY_RUN:-0}"
+
+# 兼容旧调用方式：只有一个数字参数时视为关机通知
+case "${1:-}" in
+  warning|shutdown) event="$1" ;;
+  *)
+    event="shutdown"
+    used_bytes="${1:-0}"
+    limit_bytes="${2:-0}"
+    ;;
+esac
 
 format_bytes() {
   local value="$1"
@@ -30,7 +41,11 @@ format_bytes() {
   fi
 }
 
-subject="服务器关机：已用流量 $(format_bytes "$used_bytes")，阈值 $(format_bytes "$limit_bytes")"
+if [ "$event" = "warning" ]; then
+  subject="流量预警：已用 $(format_bytes "$used_bytes")（${warn_percent}%），阈值 $(format_bytes "$limit_bytes")"
+else
+  subject="服务器关机：已用流量 $(format_bytes "$used_bytes")，阈值 $(format_bytes "$limit_bytes")"
+fi
 body_file=$(mktemp)
 mail_config=$(mktemp)
 
@@ -102,6 +117,7 @@ port ${SMTP_PORT}
 auth on
 tls on
 tls_starttls on
+tls_trust_file /etc/ssl/certs/ca-certificates.crt
 from ${MAIL_FROM}
 user ${SMTP_USER}
 password ${SMTP_PASS}
