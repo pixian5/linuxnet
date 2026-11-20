@@ -71,30 +71,37 @@ require_file() {
 }
 
 # 云镜像的 unattended-upgrades 常会持锁，直接 apt 会失败。
-# 这里最多等 10 分钟，让后台升级先跑完，避免部署因偶发锁冲突中断。
-wait_for_dpkg_lock() {
-  local waited=0
-  # fuser 不一定预装，用 pgrep 判断更稳；同时覆盖 lock-frontend 与普通 lock
-  while pgrep -f "unattended-upgr|apt-get|dpkg " >/dev/null 2>&1 \
-        && [ -e /var/lib/dpkg/lock-frontend ]; do
-    if [ "$waited" -ge 600 ]; then
-      echo "等待 dpkg 锁超时（600 秒），请检查 unattended-upgrades 是否卡住"
-      exit 1
+# 注意不能用 pgrep 判断：unattended-upgrade-shutdown 是常驻守护进程，并不持锁，会造成误报空等。
+# 这里改为直接调用 apt，仅当报错文本是锁冲突时才等待重试，最多 10 分钟。
+apt_with_lock_retry() {
+  local waited=0 output
+  while :; do
+    if output=$(DEBIAN_FRONTEND=noninteractive apt-get "$@" 2>&1); then
+      printf '%s\n' "$output"
+      return 0
     fi
-    if [ "$waited" -eq 0 ]; then
-      log "dpkg 被其它进程占用（通常是 unattended-upgrades），等待其完成…"
+    printf '%s\n' "$output" >&2
+    if printf '%s' "$output" | grep -q "Could not get lock\|Unable to acquire the dpkg frontend lock"; then
+      if [ "$waited" -ge 600 ]; then
+        echo "等待 dpkg 锁超时（600 秒），请检查 unattended-upgrades 是否卡住"
+        return 1
+      fi
+      if [ "$waited" -eq 0 ]; then
+        log "dpkg 被其它进程占用（通常是 unattended-upgrades），等待其完成…"
+      fi
+      sleep 10
+      waited=$((waited + 10))
+      continue
     fi
-    sleep 10
-    waited=$((waited + 10))
+    return 1
   done
 }
 
 install_packages() {
   log "安装系统依赖"
-  wait_for_dpkg_lock
-  apt-get update
+  apt_with_lock_retry update
   # 不再需要 bpfcc-tools：picosnitch 2.x 使用预编译 CO-RE 对象，只用内核/libbpf，不需要 BCC
-  DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  apt_with_lock_retry install -y \
     python3 \
     python3-venv \
     python3-pip \
