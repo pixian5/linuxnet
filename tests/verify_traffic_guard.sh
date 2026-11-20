@@ -20,6 +20,8 @@ export BOOT_ID_FILE="$WORK/boot_id"
 printf 'boot-a\n' > "$BOOT_ID_FILE"
 # 日志与关机动作都限制在测试临时目录
 printf '#!/bin/sh\nexit 0\n' > "$WORK/logger"
+# 生成的替身脚本要在运行时展开 MAIL_LOG，因此在单引号里保留变量名
+# shellcheck disable=SC2016
 printf '#!/bin/sh\necho poweroff >> "$MAIL_LOG"\n' > "$WORK/fake-poweroff"
 chmod +x "$WORK/logger" "$WORK/fake-poweroff"
 export POWEROFF_CMD="$WORK/fake-poweroff"
