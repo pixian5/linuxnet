@@ -87,13 +87,18 @@ LIMIT_BYTES=$LIMIT ACTION=none WARN_PERCENT=80 run
 check "预警不重复发送" 1 "$(mail_count warning)"
 
 echo "场景 6：达到阈值，ACTION=none 只发一次信，不关机"
+BEFORE_WARN=$(mail_count warning)
 echo $((3000000 + 101 * 1048576)) > "$FAKE_TX"
 LIMIT_BYTES=$LIMIT ACTION=none WARN_PERCENT=80 run
 check "超限后仍正常退出" 0 $?
 check "发出 1 封关机信" 1 "$(mail_count shutdown)"
+# 越过阈值时不能再补发预警：邮件商（如 189）会限流，导致关机信被拒
+check "超限时不新增预警信" "$BEFORE_WARN" "$(mail_count warning)"
+check "预警标记已置位" 1 "$(get WARNED)"
 echo $((3000000 + 110 * 1048576)) > "$FAKE_TX"
 LIMIT_BYTES=$LIMIT ACTION=none WARN_PERCENT=80 run
 check "超限信不重复发送" 1 "$(mail_count shutdown)"
+check "仍不新增预警信" "$BEFORE_WARN" "$(mail_count warning)"
 
 echo "场景 7：跨月自动重置累计"
 printf 'PERIOD=2020-01\nTOTAL_BYTES=90000000\nLAST_COUNTER=100\nWARNED=1\nALERTED=1\n' > "$STATE"

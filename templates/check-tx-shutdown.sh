@@ -107,6 +107,10 @@ if [ "$used" -ge "$LIMIT_BYTES" ]; then
     should_alert=1
     alerted=1
   fi
+  # 已越过阈值时不再补发预警邮件：
+  # 多数邮件服务商（如 189）对短时间连续发信会限流（535 authentication failed），
+  # 一发预警+一发关机很容易让真正重要的关机通知被拒。
+  warned=1
 fi
 
 write_state
