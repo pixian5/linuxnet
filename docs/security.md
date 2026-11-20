@@ -27,13 +27,16 @@ Traffic Guard Web 即使只监听本机，也强制使用 Basic Auth。用户名
 
 ## 安装与验证
 
-安装脚本固定 Picosnitch 和 Dashboard 依赖版本，并验证第三方源码补丁的命中次数。上游源码结构变化时安装会明确失败，避免静默得到错误 UI。每次部署会先用 `--force-reinstall` 还原上游文件再打补丁，因此安装脚本可以重复执行。
+安装脚本固定 Picosnitch 版本。每次部署先用 `--force-reinstall` 重装上游包，保证安装脚本可以重复执行且不会残留改过的文件。
+
+Picosnitch 2.x 不再需要运行时编译 BPF，也不再需要 `bpfcc-tools`。安装脚本会在部署结束后等待数据库产生连接记录，只有真正采集到数据才算成功，避免服务处于 `activating` 却误判为可用。
 
 安装结束必须满足以下条件：
 
 - 四个 systemd 单元均为 active。
-- Picosnitch Dash 返回 HTTP 200。
+- Picosnitch Web 返回 HTTP 200。
 - Traffic Guard Web 经认证后返回 HTTP 200。
+- `/var/lib/picosnitch/picosnitch.db` 中至少存在一条连接记录。
 
 若验证失败，先查看：
 

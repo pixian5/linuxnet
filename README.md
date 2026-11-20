@@ -30,8 +30,9 @@ bash scripts/install_linuxnet_stack.sh
 ```bash
 TRAFFIC_GUARD_IFACE=eth0 \
 TRAFFIC_GUARD_LIMIT_MIB=1024 \
+TRAFFIC_GUARD_WARN_PERCENT=80 \
 TRAFFIC_GUARD_INTERVAL_SECONDS=10 \
-PICOSNITCH_DASH_PORT=5100 \
+PICOSNITCH_WEB_PORT=5100 \
 TRAFFIC_GUARD_WEB_PORT=5101 \
 bash scripts/install_linuxnet_stack.sh
 ```
@@ -57,7 +58,8 @@ bash scripts/install_linuxnet_stack.sh
 
 ## 当前默认行为
 
-- `Picosnitch Web` 默认 `30 秒` 自动刷新
+- `Picosnitch` 使用 2.2.1（预编译 CO-RE BPF，兼容 6.x/7.x 内核）
+- `Picosnitch Web` 监听 `127.0.0.1:5100`
 - `traffic-guard.timer` 默认每 `10 秒` 检查一次
 - `traffic-guard Web` 默认每 `10 秒` 刷新一次
 - 出站流量按**自然月**累计：跨月自动清零，跨重启继续累计（内核计数器回绕不会清零已用量）
@@ -72,13 +74,20 @@ TRAFFIC_GUARD_WARN_PERCENT=80   # 预警线百分比，0 表示关闭预警
 TRAFFIC_GUARD_ACTION=none       # none = 只发通知不关机，便于先观察
 ```
 
+## 关键约束（踩过的坑）
+
+- **Ubuntu 24.04 自带 Python 3.12**：`pandas` 必须用有 cp312 wheel 的版本。
+- **内核 6.14+/7.x 不能用 BCC 0.29 编译 BPF**：`BPF_LOAD_ACQ`、`BPF_STORE_REL`、`BPF_F_CPU`、`BPF_TRACE_FSESSION` 等新常量缺失。因此必须用 picosnitch 2.x 的预编译 CO-RE 对象，不要退回 1.x。
+- **`unattended-upgrades` 会持有 dpkg 锁**：安装脚本只在 apt 报锁冲突时重试；不能用 `pgrep unattended` 判断，因为 `unattended-upgrade-shutdown` 是常驻进程并不持锁。
+- **picosnitch 2.x 数据库结构与 1.x 不同**：`exe` 规范化到 `executables` 表，查询必须 JOIN。
+
 ## 当前开发进度
 
-v0.0.3 已修复重复部署失败与流量统计跨重启丢失，并新增月度累计与预警。详见 [docs/20261120-1245-当前开发进度-未标注.md](docs/20261120-1245-当前开发进度-未标注.md)。
+v0.0.5 已完成 picosnitch 2.2.1 升级，并在 uw.sbbz.tech、ue.sbbz.tech 两台服务器实际部署验证通过。详见 [docs/20261120-1310-当前开发进度-未标注.md](docs/20261120-1310-当前开发进度-未标注.md)。
 
 ## 下一步待实现
 
-剩余待办（`pandas` 在 Ubuntu 24.04 的 wheel、msmtp 配置校验、Web 端编辑预警线等）见 [docs/20261120-1245-下一步待实现-未标注.md](docs/20261120-1245-下一步待实现-未标注.md)。
+剩余待办（Bark 推送兜底、Web 端编辑预警线、部署回滚等）见 [docs/20261120-1310-下一步待实现-未标注.md](docs/20261120-1310-下一步待实现-未标注.md)。
 
 ## 自动测试与部署
 
