@@ -50,7 +50,10 @@ TRAFFIC_GUARD_ACTION="${TRAFFIC_GUARD_ACTION:-${EXISTING_ACTION:-poweroff}}"
 TRAFFIC_GUARD_WARN_PERCENT="${TRAFFIC_GUARD_WARN_PERCENT:-${EXISTING_WARN:-80}}"
 TRAFFIC_GUARD_INTERVAL_SECONDS="${TRAFFIC_GUARD_INTERVAL_SECONDS:-10}"
 # 邮件通知开关。旧名 ENABLE_GMAIL_NOTIFY 保留兼容，新名更通用（支持 189/QQ/Gmail 等任意 SMTP）
-ENABLE_MAIL_NOTIFY="${ENABLE_MAIL_NOTIFY:-${ENABLE_GMAIL_NOTIFY:-0}}"
+# 注意：这里先记下“用户是否显式设置过”，不能直接赋默认值，
+# 否则无法区分“用户没说”和“用户明确关闭”，会导致下面读取已有配置时判断失败。
+MAIL_NOTIFY_EXPLICIT="${ENABLE_MAIL_NOTIFY:-${ENABLE_GMAIL_NOTIFY:-}}"
+ENABLE_MAIL_NOTIFY="${MAIL_NOTIFY_EXPLICIT:-0}"
 
 MAIL_FROM="${MAIL_FROM:-}"
 MAIL_TO="${MAIL_TO:-}"
@@ -78,9 +81,9 @@ if [ -f "$MAIL_CONF_FILE" ]; then
   SMTP_STARTTLS="${SMTP_STARTTLS:-$(mail_existing SMTP_STARTTLS)}"
   SMTP_USER="${SMTP_USER:-$(mail_existing SMTP_USER)}"
   SMTP_PASS="${SMTP_PASS:-$(mail_existing SMTP_PASS)}"
-  # 已有配置且必填项齐全时，默认保持启用
-  if [ -n "$MAIL_FROM" ] && [ -n "$MAIL_TO" ] && [ -n "$SMTP_USER" ] && [ -n "$SMTP_PASS" ]; then
-    ENABLE_MAIL_NOTIFY="${ENABLE_MAIL_NOTIFY:-${ENABLE_GMAIL_NOTIFY:-1}}"
+  # 已有配置且必填项齐全时，若用户没显式设置开关，则默认保持启用
+  if [ -n "$MAIL_FROM" ] && [ -n "$MAIL_TO" ] && [ -n "$SMTP_USER" ] && [ -n "$SMTP_PASS" ] && [ -z "$MAIL_NOTIFY_EXPLICIT" ]; then
+    ENABLE_MAIL_NOTIFY="1"
   fi
 fi
 
