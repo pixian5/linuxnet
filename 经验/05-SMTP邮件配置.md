@@ -72,6 +72,21 @@ echo "SMTP_PASS=$(sq "$SMTP_PASS")" >> conf
 
 跳过第 2 步直接用 msmtp 排查，会把认证失败和配置语法错误混在一起。
 
+## 邮件商会限流，不要短时间连发
+
+189 邮箱实测：连续发信会返回
+
+```
+msmtp: server message: 535 authentication failed: -200
+smtpmsg='535 authentication failed: -200' errormsg='authentication failed (method LOGIN)'
+```
+
+**这个报错看起来像密码错了，其实是限流。** 间隔 20 秒后同样的配置就能成功。
+
+排查时要先确认“同样的配置之前成功过吗”。如果成功过，优先怀疑限流而不是密码。
+
+设计通知逻辑时，避免一次触发连发多封。本项目原逻辑在单次检查同时越过预警线和阈值时会连发“预警 + 关机”两封，第二封（更重要的关机通知）很可能被拒。现在改为越过阈值时只发一封关机通知。
+
 ## 日志位置
 
 本项目 msmtp 日志写到 `/var/log/traffic-guard-msmtp.log`。成功的样子：
