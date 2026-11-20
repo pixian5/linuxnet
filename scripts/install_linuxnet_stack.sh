@@ -10,6 +10,27 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd "${SCRIPT_DIR}/.." && pwd)
 TEMPLATE_DIR="${ROOT_DIR}/templates"
 
+# 读取服务器上已有的 /etc/default/traffic-guard 配置。
+# 目的：CI 部署时不带任何环境变量，如果直接用代码里的默认值覆盖，
+# 会把管理员通过 Web 面板或手工改过的阈值/动作重置回默认值，可能造成误关机。
+read_existing() {
+  local key="$1" file="/etc/default/traffic-guard"
+  if [ -f "$file" ]; then
+    sed -n "s/^${key}=//p" "$file" | tail -1
+  fi
+}
+
+EXISTING_LIMIT_BYTES="$(read_existing LIMIT_BYTES)"
+EXISTING_IFACE="$(read_existing IFACE)"
+EXISTING_ACTION="$(read_existing ACTION)"
+EXISTING_WARN="$(read_existing WARN_PERCENT)"
+
+if [[ "$EXISTING_LIMIT_BYTES" =~ ^[0-9]+$ ]] && [ "$EXISTING_LIMIT_BYTES" -ge 1048576 ]; then
+  EXISTING_LIMIT_MIB=$((EXISTING_LIMIT_BYTES / 1024 / 1024))
+else
+  EXISTING_LIMIT_MIB=1024
+fi
+
 PICOSNITCH_VENV="${PICOSNITCH_VENV:-/opt/picosnitch-venv}"
 # picosnitch 2.x 使用预编译 CO-RE BPF 对象（picosnitch/bpf/*.bpf.o），无需运行时编译。
 # 1.x 会在运行时用系统 BCC 编译 BPF 源码，而 Ubuntu 24.04 只有 BCC 0.29，
@@ -21,10 +42,12 @@ PICOSNITCH_DB="/var/lib/picosnitch/picosnitch.db"
 PICOSNITCH_CONFIG_DIR="/etc/picosnitch"
 TRAFFIC_GUARD_WEB_HOST="${TRAFFIC_GUARD_WEB_HOST:-127.0.0.1}"
 TRAFFIC_GUARD_WEB_PORT="${TRAFFIC_GUARD_WEB_PORT:-5101}"
-TRAFFIC_GUARD_IFACE="${TRAFFIC_GUARD_IFACE:-eth0}"
-TRAFFIC_GUARD_LIMIT_MIB="${TRAFFIC_GUARD_LIMIT_MIB:-1024}"
-TRAFFIC_GUARD_ACTION="${TRAFFIC_GUARD_ACTION:-poweroff}"
-TRAFFIC_GUARD_WARN_PERCENT="${TRAFFIC_GUARD_WARN_PERCENT:-80}"
+# 这三项的默认值优先取服务器上已有配置（见上方 read_existing），
+# 其次才是代码里的兜底值。这样 CI 重部署不会覆盖现场调好的阈值。
+TRAFFIC_GUARD_IFACE="${TRAFFIC_GUARD_IFACE:-${EXISTING_IFACE:-eth0}}"
+TRAFFIC_GUARD_LIMIT_MIB="${TRAFFIC_GUARD_LIMIT_MIB:-$EXISTING_LIMIT_MIB}"
+TRAFFIC_GUARD_ACTION="${TRAFFIC_GUARD_ACTION:-${EXISTING_ACTION:-poweroff}}"
+TRAFFIC_GUARD_WARN_PERCENT="${TRAFFIC_GUARD_WARN_PERCENT:-${EXISTING_WARN:-80}}"
 TRAFFIC_GUARD_INTERVAL_SECONDS="${TRAFFIC_GUARD_INTERVAL_SECONDS:-10}"
 # 邮件通知开关。旧名 ENABLE_GMAIL_NOTIFY 保留兼容，新名更通用（支持 189/QQ/Gmail 等任意 SMTP）
 ENABLE_MAIL_NOTIFY="${ENABLE_MAIL_NOTIFY:-${ENABLE_GMAIL_NOTIFY:-0}}"
