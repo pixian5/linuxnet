@@ -65,3 +65,18 @@ journalctl -u picosnitch.service -u picosnitch-dash.service -u traffic-guard.tim
 只有启用 `ENABLE_DEPLOY=true` 且本仓库 `main` 分支的推送通过 CI（持续集成）时才部署。服务器地址来自 `DEPLOY_SERVER_HOSTS`，支持逗号、空格或换行分隔的多台机器（旧名 `DEPLOY_SERVER_HOST` 仍可用）；逐台按顺序部署，任一失败即中止，已成功的机器保持新版本。目标路径固定为 `/opt/linuxnet`；目录不存在时克隆，已有目录须为来源正确、位于 `main` 的独立干净仓库。符号链接、本地改动、未跟踪的非忽略文件、不能快进的本地提交都会中止部署；`__pycache__`、`.DS_Store` 等被忽略的产物不影响。拉取后核对远端 `main` 与通过检查的提交标识（SHA），快进后再次核对本地版本，再执行安装；若分支已前进，旧任务停止。安装以 `sudo -n` 执行，执行前校验部署用户具备免密 sudo（云镜像通常禁用 root 直接登录）。服务器主机密钥须预先核验并存入 `DEPLOY_KNOWN_HOSTS`，不在运行时临时信任新密钥。
 
 部署密钥应为专用密钥，不与个人登录密钥复用；吊销时从各服务器 `authorized_keys` 删除对应公钥即可。
+
+## 历史重写（v0.0.18）
+
+仓库是公开的，历史中的真实凭据（189 账号与口令、Bark 设备 URL）曾长期可被 clone。v0.0.18 已用 `git filter-repo` 重写全部 30 个提交，同时处理**文件内容与提交说明**：
+
+```bash
+git filter-repo --replace-text /tmp/replacements.txt \
+                --replace-message /tmp/replacements.txt --force
+```
+
+只加 `--replace-text` 不处理提交说明，必须在副本上验证后再对主仓库执行。
+
+**清理历史不等于凭据安全。** 暴露过的值可能已被克隆、镜像或缓存，必须在服务商侧轮换并确认旧值失效。重写后所有哈希改变，旧 clone 必须重新克隆，不能 `git pull`；服务器部署目录需 `git fetch && git reset --hard origin/main` 才能继续自动部署。
+
+**占位符豁免规则要收窄。** 早期 `<\s*[A-Za-z_]+\s*>` 会豁免任何尖括号内容，等于“把口令写成 `<任意词>` 就能绕过扫描”。现在只豁免白名单名称（`SMTP_PASS`、`BARK_DEVICE_KEY`、`WEB_TOKEN` 等），见 [scripts/check_secrets.py](../scripts/check_secrets.py)。

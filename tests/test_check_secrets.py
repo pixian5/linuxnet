@@ -81,10 +81,12 @@ class SecretCheckTests(unittest.TestCase):
             ]:
                 self.assertEqual(staged(placeholder), 0, placeholder)
 
-            # 换成真实样式的值仍必须拦截；用拼接生成，避免本文件自身被凭据扫描误判
+            # 换成真实样式的值仍必须拦截；用拼接生成，避免本文件自身被凭据扫描误判，
+            # 也避免历史上留下可直接复用的完整口令字符串
             at = '@'
+            real_password = 'Zq9!' + 'realLooking' + 'Pass#1'
             for real in [
                 'MAIL_FROM=' + 'someone' + at + '189.cn',
-                'SMTP_PASS=' + '<TEST_PASSWORD>',
+                'SMTP_PASS=' + real_password,
             ]:
                 self.assertEqual(staged(real), 1, '真实样式的值应被拦截')

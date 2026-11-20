@@ -17,10 +17,16 @@ RULES = (
 )
 PATTERN = re.compile(b'|'.join(RULES), re.I)
 # 文档示例与占位符不应触发告警，否则任何人按 README 复制示例都会被本地钩子拦下。
-# 只有明显是占位（your@ / example. / <...> / ${...} / sender@ 等）才豁免。
+# 只有明显是占位（your@ / example. / ${...} / sender@ 等）才豁免。
+# <...> 只认白名单里的占位符名：否则任何写成尖括号的值都会被豁免，
+# 等于留了一个“把口令改成 <任意词> 就能绕过扫描”的口子。
+PLACEHOLDER_NAMES = (
+    rb'SMTP_?PASS(?:WORD)?|SMTP_?USER|SMTP_?ACCOUNT|MAIL_?FROM|MAIL_?TO'
+    rb'|BARK_?(?:DEVICE_)?KEY|WEB_?TOKEN|PASSWORD|TOKEN|SECRET'
+)
 PLACEHOLDER = re.compile(
     rb'(?:your[_-]|your@|example\.(?:com|org|invalid)|sender@|receiver@'
-    rb'|<\s*[A-Za-z_]+\s*>|\$\{[A-Za-z_]+\}|xxxx+)',
+    rb'|<\s*(?:' + PLACEHOLDER_NAMES + rb')\s*>|\$\{[A-Za-z_]+\}|xxxx+)',
     re.I,
 )
 # 对无上下文的历史口令和设备密钥只保留指纹；按字符组筛选候选，含前后缀也能识别。
