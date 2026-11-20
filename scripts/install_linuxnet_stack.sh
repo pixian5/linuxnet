@@ -62,6 +62,28 @@ SMTP_STARTTLS="${SMTP_STARTTLS:-}"
 SMTP_USER="${SMTP_USER:-}"
 SMTP_PASS="${SMTP_PASS:-}"
 
+# 若服务器上已有邮件配置，则在未显式传入时自动继承并视为“已启用”。
+# 否则 CI 重部署（不带任何环境变量）会跳过邮件配置写入，
+# 虽不会删掉旧文件，但一旦上游模板或路径变化就会静默失去通知能力。
+MAIL_CONF_FILE="/etc/traffic-guard/gmail-notify.conf"
+if [ -f "$MAIL_CONF_FILE" ]; then
+  mail_existing() {
+    # 配置文件里的值用单引号包裹，这里去掉首尾引号
+    sed -n "s/^$1=//p" "$MAIL_CONF_FILE" | tail -1 | sed "s/^'//; s/'$//"
+  }
+  MAIL_FROM="${MAIL_FROM:-$(mail_existing MAIL_FROM)}"
+  MAIL_TO="${MAIL_TO:-$(mail_existing MAIL_TO)}"
+  SMTP_HOST="${SMTP_HOST:-$(mail_existing SMTP_HOST)}"
+  SMTP_PORT="${SMTP_PORT:-$(mail_existing SMTP_PORT)}"
+  SMTP_STARTTLS="${SMTP_STARTTLS:-$(mail_existing SMTP_STARTTLS)}"
+  SMTP_USER="${SMTP_USER:-$(mail_existing SMTP_USER)}"
+  SMTP_PASS="${SMTP_PASS:-$(mail_existing SMTP_PASS)}"
+  # 已有配置且必填项齐全时，默认保持启用
+  if [ -n "$MAIL_FROM" ] && [ -n "$MAIL_TO" ] && [ -n "$SMTP_USER" ] && [ -n "$SMTP_PASS" ]; then
+    ENABLE_MAIL_NOTIFY="${ENABLE_MAIL_NOTIFY:-${ENABLE_GMAIL_NOTIFY:-1}}"
+  fi
+fi
+
 validate_inputs() {
   [[ "$PICOSNITCH_VENV" =~ ^/[A-Za-z0-9_./-]+$ ]] || {
     echo "PICOSNITCH_VENV 必须是安全的绝对路径"
