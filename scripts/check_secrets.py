@@ -84,7 +84,17 @@ def main():
         def resolve(ref):
             return git('rev-parse', '--verify', '--end-of-options', ref+'^{commit}').strip().decode()
         head = resolve(head)
-        exclude = [] if base == 'ROOT' else ['^'+resolve(base)]
+        if base == 'ROOT':
+            exclude = []
+        else:
+            try:
+                exclude = ['^'+resolve(base)]
+            except subprocess.CalledProcessError:
+                # 强制推送（如重写历史）后，事件里的 BEFORE 可能已不存在。
+                # 此时不能跳过检查，否则重写后的全部历史都未经验证；
+                # 退化为检查 head 可达的全部提交（仍需逐条过规则与指纹）。
+                print('基准提交不可达（可能是强制推送），改为检查全部历史。', file=sys.stderr)
+                exclude = []
         for oid in git('rev-list', head, *exclude).decode().split():
             check(git('show', '-s', '--format=%B', oid), '提交说明 '+oid[:12])
             parents = git('show', '-s', '--format=%P', oid).decode().split()
