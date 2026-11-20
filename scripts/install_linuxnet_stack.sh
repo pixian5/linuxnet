@@ -57,10 +57,10 @@ ENABLE_MAIL_NOTIFY="${MAIL_NOTIFY_EXPLICIT:-0}"
 
 MAIL_FROM="${MAIL_FROM:-}"
 MAIL_TO="${MAIL_TO:-}"
-SMTP_HOST="${SMTP_HOST:-smtp.gmail.com}"
-SMTP_PORT="${SMTP_PORT:-587}"
-# 465 是隐式 TLS（直接 SSL），587 是 STARTTLS，两者不能混用。
-# 留空则按端口自动判断：465 -> off，其余 -> on。
+# SMTP_HOST / SMTP_PORT / SMTP_STARTTLS 不能在这里赋默认值，
+# 否则下面的“读取已有配置”会永远拿不到空值分支。
+SMTP_HOST="${SMTP_HOST:-}"
+SMTP_PORT="${SMTP_PORT:-}"
 SMTP_STARTTLS="${SMTP_STARTTLS:-}"
 SMTP_USER="${SMTP_USER:-}"
 SMTP_PASS="${SMTP_PASS:-}"
@@ -86,6 +86,10 @@ if [ -f "$MAIL_CONF_FILE" ]; then
     ENABLE_MAIL_NOTIFY="1"
   fi
 fi
+
+# 继承完已有配置后再补默认值，保证“服务器上的值”优先于“代码默认值”
+SMTP_HOST="${SMTP_HOST:-smtp.gmail.com}"
+SMTP_PORT="${SMTP_PORT:-587}"
 
 validate_inputs() {
   [[ "$PICOSNITCH_VENV" =~ ^/[A-Za-z0-9_./-]+$ ]] || {
