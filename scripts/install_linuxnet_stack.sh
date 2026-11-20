@@ -168,6 +168,19 @@ install_packages() {
 
 install_picosnitch() {
   log "安装 Picosnitch venv"
+  # 系统 Python 大版本升级（如 24.04 的 3.12 -> 26.04 的 3.14）会让旧 venv 失效：
+  # 目录还叫 lib/python3.12，解释器却已是 3.14，启动时报 No module named picosnitch。
+  # 这里检测 pyvenv.cfg 记录的版本与当前 python3 是否一致，不一致就重建。
+  local venv_version=""
+  if [ -f "${PICOSNITCH_VENV}/pyvenv.cfg" ]; then
+    venv_version=$(sed -n 's/^version = //p' "${PICOSNITCH_VENV}/pyvenv.cfg" | head -1)
+  fi
+  local system_version
+  system_version=$(python3 -c 'import platform; print(platform.python_version())')
+  if [ -n "$venv_version" ] && [ "$venv_version" != "$system_version" ]; then
+    log "检测到 Python 版本变化（venv ${venv_version} -> 系统 ${system_version}），重建 venv"
+    rm -rf "$PICOSNITCH_VENV"
+  fi
   python3 -m venv "$PICOSNITCH_VENV"
   "$PICOSNITCH_VENV/bin/pip" install --upgrade pip setuptools wheel
   # 2.x 是预编译 BPF 包，依赖由 pip 自动解析；--force-reinstall 保证可重复部署
