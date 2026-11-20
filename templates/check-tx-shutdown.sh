@@ -5,6 +5,10 @@ IFACE="${IFACE:-eth0}"
 LIMIT_BYTES="${LIMIT_BYTES:-1073741824}"
 ACTION="${ACTION:-poweroff}"
 WARN_PERCENT="${WARN_PERCENT:-80}"
+# 硬顶百分比：自动关机一次后默认不再关机，给人工留出处理窗口；
+# 但累计仍会增长，达到“阈值 × 150%”时再强制关机一次兜底，防止忘记复位导致无限超量。
+# 设为 0 表示关闭硬顶（即纯开关：复位前完全不再关机）。
+HARD_LIMIT_PERCENT="${HARD_LIMIT_PERCENT:-150}"
 STATE_FILE="${STATE_FILE:-/var/lib/traffic-guard/${IFACE}.baseline}"
 # 可替换内核输入和外部程序，以便隔离测试
 BOOT_ID_FILE="${BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
@@ -33,13 +37,15 @@ if ! is_uint "$current" || ! is_uint "$LIMIT_BYTES" || [ "$LIMIT_BYTES" -le 0 ];
   exit 1
 fi
 
-# 状态文件记录：本周期累计出站流量、上次看到的内核计数器、周期、预警/超限通知标记
+# 状态文件记录：本周期累计出站流量、上次看到的内核计数器、周期、预警/超限通知标记、
+# 以及本周期是否已经执行过一次自动关机（SHUTDOWN_DONE，用于“人工复位前不再关机”）
 state_period=""
 state_boot_id=""
 total=0
 last=""
 warned=0
 alerted=0
+shutdown_done=0
 if [ -f "$STATE_FILE" ]; then
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%$'\r'}"
@@ -58,6 +64,7 @@ if [ -f "$STATE_FILE" ]; then
       LAST_COUNTER) is_uint "$value" && last="$value" ;;
       WARNED) is_uint "$value" && warned="$value" ;;
       ALERTED) is_uint "$value" && alerted="$value" ;;
+      SHUTDOWN_DONE) is_uint "$value" && shutdown_done="$value" ;;
       *) ;;
     esac
   done < "$STATE_FILE"
@@ -69,17 +76,19 @@ if [ -n "$last" ] && [ -z "$state_period" ]; then
 fi
 
 if [ "$state_period" != "$PERIOD" ]; then
-  # 新的计费周期：累计清零，计数器基线对齐到当前值，通知标记复位
+  # 新的计费周期：累计清零，计数器基线对齐到当前值，所有标记（含关机标记）复位
   total=0
   last="$current"
   warned=0
   alerted=0
+  shutdown_done=0
   logger -t traffic-guard "进入新的计费周期 ${PERIOD}，累计出站流量已重置"
 elif [ -z "$last" ]; then
   # 首次运行或状态文件损坏：从现在开始计数
   last="$current"
   warned=0
   alerted=0
+  shutdown_done=0
 elif [ -n "$state_boot_id" ] && [ "$state_boot_id" != "$boot_id" ]; then
   # 同月重启后，当前启动的全部出站字节均未计入旧累计
   last=0
@@ -97,8 +106,8 @@ total="$used"
 write_state() {
   local tmp
   tmp="$(mktemp "${STATE_FILE}.XXXXXX")"
-  printf 'PERIOD=%s\nBOOT_ID=%s\nTOTAL_BYTES=%s\nLAST_COUNTER=%s\nWARNED=%s\nALERTED=%s\n' \
-    "$PERIOD" "$boot_id" "$total" "$current" "$warned" "$alerted" > "$tmp"
+  printf 'PERIOD=%s\nBOOT_ID=%s\nTOTAL_BYTES=%s\nLAST_COUNTER=%s\nWARNED=%s\nALERTED=%s\nSHUTDOWN_DONE=%s\n' \
+    "$PERIOD" "$boot_id" "$total" "$current" "$warned" "$alerted" "$shutdown_done" > "$tmp"
   chmod 600 "$tmp"
   mv -f "$tmp" "$STATE_FILE"
 }
@@ -114,6 +123,13 @@ fi
 
 over_limit=0
 should_alert=0
+do_shutdown=1
+# 硬顶字节数；HARD_LIMIT_PERCENT 不是大于 100 的整数时视为关闭硬顶
+hard_bytes=0
+if is_uint "$HARD_LIMIT_PERCENT" && [ "$HARD_LIMIT_PERCENT" -gt 100 ]; then
+  hard_bytes=$((LIMIT_BYTES * HARD_LIMIT_PERCENT / 100))
+fi
+
 if [ "$used" -ge "$LIMIT_BYTES" ]; then
   over_limit=1
   if [ "$alerted" -eq 0 ]; then
@@ -124,6 +140,22 @@ if [ "$used" -ge "$LIMIT_BYTES" ]; then
   # 多数邮件服务商（如 189）对短时间连续发信会限流（535 authentication failed），
   # 一发预警+一发关机很容易让真正重要的关机通知被拒。
   warned=1
+
+  # 本周期已经自动关过机：默认不再关机，避免人工开机后 10 秒又被关掉而无法处理。
+  # ACTION=none 本来就不关机，保持原语义不做保护。
+  # 只有到达硬顶才再关一次，防止忘记复位后无限超量。
+  if [ "$ACTION" != "none" ] && [ "$shutdown_done" -ge 1 ]; then
+    if [ "$shutdown_done" -eq 1 ] && [ "$hard_bytes" -gt 0 ] && [ "$used" -ge "$hard_bytes" ]; then
+      logger -t traffic-guard "出站流量已达硬顶 ${HARD_LIMIT_PERCENT}%（${used}/${LIMIT_BYTES} bytes），再次执行关机"
+      should_alert=1
+    else
+      do_shutdown=0
+    fi
+  fi
+  # 在真正执行关机动作前先记下次数并落盘，重启后才发现本周期已关过机就晚了
+  if [ "$do_shutdown" -eq 1 ] && [ "$ACTION" != "none" ]; then
+    shutdown_done=$((shutdown_done + 1))
+  fi
 fi
 
 write_state
@@ -143,11 +175,17 @@ if [ "$over_limit" -eq 0 ]; then
   exit 0
 fi
 
-logger -t traffic-guard "网卡 ${IFACE} 出站流量达到阈值 ${used} bytes（阈值 ${LIMIT_BYTES}），action=${ACTION}"
 # 已通知过就不再重复发信，避免 ACTION=none 时每轮刷邮箱
 if [ "$should_alert" -eq 1 ]; then
   send_mail shutdown "$used" "$LIMIT_BYTES"
 fi
+
+if [ "$do_shutdown" -eq 0 ]; then
+  logger -t traffic-guard "本周期已自动关机 ${shutdown_done} 次，本次不再关机（${used}/${LIMIT_BYTES} bytes）；清理流量后请在 Web 面板复位"
+  exit 0
+fi
+
+logger -t traffic-guard "网卡 ${IFACE} 出站流量达到阈值 ${used} bytes（阈值 ${LIMIT_BYTES}），action=${ACTION}"
 
 case "$ACTION" in
   poweroff)

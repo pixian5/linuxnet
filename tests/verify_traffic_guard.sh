@@ -166,6 +166,46 @@ echo "场景 13：启动标识不可读时失败并记录，不静默退出"
 BOOT_ID_FILE="$WORK/no-such-boot-id" ACTION=none run
 check "缺失启动标识返回非零" 1 $?
 
+echo "场景 14：本周期已自动关机后，再次超限不再关机"
+# 去掉场景 12 的超时替身，恢复真实 timeout，后面才能按 MAIL 前缀统计邮件
+rm -f "$WORK/timeout"
+printf 'boot-c\n' > "$BOOT_ID_FILE"
+printf 'PERIOD=%s\nBOOT_ID=boot-c\nTOTAL_BYTES=1200000\nLAST_COUNTER=1000\nWARNED=1\nALERTED=1\nSHUTDOWN_DONE=1\n' "$PERIOD" > "$STATE"
+echo 2000 > "$FAKE_TX"
+before_poweroff=$(grep -cx poweroff "$MAIL_LOG" || true)
+before_shutdown_mail=$(mail_count shutdown)
+LIMIT_BYTES=1000000 ACTION=poweroff run
+check "已关机后仍正常退出" 0 $?
+check "不再重复关机" "$before_poweroff" "$(grep -cx poweroff "$MAIL_LOG" || true)"
+check "不再重复发关机信" "$before_shutdown_mail" "$(mail_count shutdown)"
+check "关机次数保持 1" 1 "$(get SHUTDOWN_DONE)"
+
+echo "场景 15：累计到硬顶 150% 时再强制关机一次"
+printf 'PERIOD=%s\nBOOT_ID=boot-c\nTOTAL_BYTES=1500000\nLAST_COUNTER=1000\nWARNED=1\nALERTED=1\nSHUTDOWN_DONE=1\n' "$PERIOD" > "$STATE"
+echo 2000 > "$FAKE_TX"
+before_poweroff=$(grep -cx poweroff "$MAIL_LOG" || true)
+before_shutdown_mail=$(mail_count shutdown)
+LIMIT_BYTES=1000000 ACTION=poweroff run
+check "硬顶触发关机" $((before_poweroff + 1)) "$(grep -cx poweroff "$MAIL_LOG" || true)"
+check "硬顶仍发关机信" $((before_shutdown_mail + 1)) "$(mail_count shutdown)"
+check "关机次数累计到 2" 2 "$(get SHUTDOWN_DONE)"
+
+echo "场景 16：人工复位后恢复自动关机"
+printf 'PERIOD=%s\nBOOT_ID=boot-c\nTOTAL_BYTES=1200000\nLAST_COUNTER=1000\nWARNED=1\nALERTED=0\nSHUTDOWN_DONE=0\n' "$PERIOD" > "$STATE"
+echo 2000 > "$FAKE_TX"
+before_poweroff=$(grep -cx poweroff "$MAIL_LOG" || true)
+LIMIT_BYTES=1000000 ACTION=poweroff run
+check "复位后重新关机" $((before_poweroff + 1)) "$(grep -cx poweroff "$MAIL_LOG" || true)"
+check "关机次数重新记为 1" 1 "$(get SHUTDOWN_DONE)"
+
+echo "场景 17：硬顶设为 0 时只关机一次，之后完全不再关机"
+printf 'PERIOD=%s\nBOOT_ID=boot-c\nTOTAL_BYTES=9000000\nLAST_COUNTER=1000\nWARNED=1\nALERTED=1\nSHUTDOWN_DONE=1\n' "$PERIOD" > "$STATE"
+echo 2000 > "$FAKE_TX"
+before_poweroff=$(grep -cx poweroff "$MAIL_LOG" || true)
+LIMIT_BYTES=1000000 ACTION=poweroff HARD_LIMIT_PERCENT=0 run
+check "关闭硬顶后不再关机" "$before_poweroff" "$(grep -cx poweroff "$MAIL_LOG" || true)"
+check "关机次数保持 1" 1 "$(get SHUTDOWN_DONE)"
+
 echo
 echo "结果：$pass 通过，$fail 失败"
 rm -rf "$WORK"

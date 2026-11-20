@@ -204,6 +204,52 @@ class TrafficGuardWebTests(unittest.TestCase):
         self.assertIsNone(legacy["total"])
         self.assertEqual(legacy["last_counter"], 600)
 
+    def test_reset_shutdown_marker_clears_only_shutdown_flags(self):
+        state_path = Path(self.temp_dir.name) / "baseline"
+        state_path.write_text(
+            "PERIOD=2026-11\nBOOT_ID=boot-a\nTOTAL_BYTES=52000000000\nLAST_COUNTER=900\n"
+            "WARNED=1\nALERTED=1\nSHUTDOWN_DONE=2\n",
+            encoding="utf-8",
+        )
+        self.assertTrue(web.reset_shutdown_marker(str(state_path)))
+        state = web.read_state(str(state_path))
+        # 已用流量与预警标记保留，只恢复自动关机
+        self.assertEqual(state["total"], 52000000000)
+        self.assertEqual(state["last_counter"], 900)
+        self.assertTrue(state["warned"])
+        self.assertFalse(state["alerted"])
+        self.assertEqual(state["shutdown_done"], 0)
+        self.assertEqual(oct(state_path.stat().st_mode & 0o777), "0o600")
+
+    def test_reset_shutdown_marker_rejects_missing_state(self):
+        self.assertFalse(web.reset_shutdown_marker(str(Path(self.temp_dir.name) / "no-such-file")))
+
+    def test_reset_endpoint_requires_its_own_csrf(self):
+        state_path = Path(self.temp_dir.name) / "baseline"
+        state_path.write_text(
+            f"PERIOD={web.datetime.now().strftime('%Y-%m')}\nBOOT_ID=boot-a\nTOTAL_BYTES=2000000000\n"
+            "LAST_COUNTER=900\nWARNED=1\nALERTED=1\nSHUTDOWN_DONE=1\n",
+            encoding="utf-8",
+        )
+        config = self.config_path.read_text(encoding="utf-8")
+        self.assertIn(f"STATE_FILE={state_path}", config)
+        headers = {
+            "Authorization": self.auth_header(),
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        # 拿改阈值的令牌去复位必须失败，说明两个写操作各自独立校验
+        threshold_csrf = hmac.new(self.token.encode(), b"update-threshold", hashlib.sha256).hexdigest()
+        status, response_headers, _ = self.request("POST", "/reset-shutdown", f"csrf={threshold_csrf}".encode(), headers)
+        self.assertEqual(status, 303)
+        self.assertIn("error=", response_headers["Location"])
+        self.assertEqual(web.read_state(str(state_path))["shutdown_done"], 1)
+
+        reset_csrf = hmac.new(self.token.encode(), b"reset-shutdown", hashlib.sha256).hexdigest()
+        status, response_headers, _ = self.request("POST", "/reset-shutdown", f"csrf={reset_csrf}".encode(), headers)
+        self.assertEqual(status, 303)
+        self.assertIn("message=", response_headers["Location"])
+        self.assertEqual(web.read_state(str(state_path))["shutdown_done"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

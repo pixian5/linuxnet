@@ -20,11 +20,20 @@ DEFAULTS = {
     "LIMIT_BYTES": str(1024 * 1024 * 1024),
     "ACTION": "poweroff",
     "WARN_PERCENT": "80",
+    "HARD_LIMIT_PERCENT": "150",
     "STATE_FILE": "/var/lib/traffic-guard/eth0.baseline",
     "WEB_TOKEN_FILE": "/etc/traffic-guard/web-token",
 }
 # 写回配置时保持这个顺序，其余未知键原样追加，避免抹掉管理员手工加的变量
-CONFIG_KEY_ORDER = ["IFACE", "LIMIT_BYTES", "ACTION", "WARN_PERCENT", "STATE_FILE", "WEB_TOKEN_FILE"]
+CONFIG_KEY_ORDER = [
+    "IFACE",
+    "LIMIT_BYTES",
+    "ACTION",
+    "WARN_PERCENT",
+    "HARD_LIMIT_PERCENT",
+    "STATE_FILE",
+    "WEB_TOKEN_FILE",
+]
 MAX_BODY_BYTES = 16 * 1024
 MAX_WORKERS = 32
 SOCKET_TIMEOUT_SECONDS = 5
@@ -77,10 +86,18 @@ def write_env_file(path, data):
 def read_state(path):
     """读取流量守卫状态文件。
 
-    新格式为 KEY=VALUE 多行（PERIOD/BOOT_ID/TOTAL_BYTES/LAST_COUNTER/WARNED/ALERTED），
+    新格式为 KEY=VALUE 多行（PERIOD/BOOT_ID/TOTAL_BYTES/LAST_COUNTER/WARNED/ALERTED/SHUTDOWN_DONE），
     旧格式是单行整数（只记录内核计数器基线）。两种格式都兼容，无法解析的字段保持 None。
     """
-    state = {"period": "", "boot_id": "", "total": None, "last_counter": None, "warned": False, "alerted": False}
+    state = {
+        "period": "",
+        "boot_id": "",
+        "total": None,
+        "last_counter": None,
+        "warned": False,
+        "alerted": False,
+        "shutdown_done": 0,
+    }
     try:
         with open(path, "r", encoding="utf-8") as fh:
             content = fh.read()
@@ -115,6 +132,11 @@ def read_state(path):
             state["warned"] = value == "1"
         elif key == "ALERTED":
             state["alerted"] = value == "1"
+        elif key == "SHUTDOWN_DONE":
+            try:
+                state["shutdown_done"] = int(value)
+            except ValueError:
+                continue
     return state
 
 
@@ -124,6 +146,47 @@ def read_int(path):
             return int(fh.read().strip())
     except (OSError, ValueError):
         return None
+
+
+def reset_shutdown_marker(path):
+    """清除本周期“已自动关机”标记，让人工处理完后恢复自动关机保护。
+
+    只复位 ALERTED 与 SHUTDOWN_DONE：预警已经发过就不再重复打扰，
+    但下一次自动关机必须重新发一封关机邮件。
+    状态文件不存在或无法解析时返回 False，由调用方提示。
+    """
+    state = read_state(path)
+    if state["last_counter"] is None:
+        return False
+    period = state["period"] or datetime.now().strftime("%Y-%m")
+    boot_id = state["boot_id"] or ""
+    total = state["total"] if state["total"] is not None else 0
+    warned = 1 if state["warned"] else 0
+    lines = [
+        f"PERIOD={period}",
+        f"BOOT_ID={boot_id}",
+        f"TOTAL_BYTES={total}",
+        f"LAST_COUNTER={state['last_counter']}",
+        f"WARNED={warned}",
+        "ALERTED=0",
+        "SHUTDOWN_DONE=0",
+    ]
+    directory = os.path.dirname(path) or "."
+    fd, temp_path = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", dir=directory, text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(temp_path, 0o600)
+        os.replace(temp_path, path)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+        raise
+    return True
 
 
 def run_command(args):
@@ -190,6 +253,13 @@ def collect_state(message="", error=""):
                 used = (state["total"] or 0) + (max(current - last, 0) if last is not None else 0)
     remaining = None if used is None else max(limit - used, 0)
     percent = None if used is None or limit <= 0 else min(used / limit * 100, 100)
+    # 硬顶百分比只在大于 100 的整数时有意义，否则视为关闭
+    try:
+        hard_percent = int(config.get("HARD_LIMIT_PERCENT", 150))
+    except (TypeError, ValueError):
+        hard_percent = 0
+    if hard_percent <= 100:
+        hard_percent = 0
     _, timer_active = run_command(["systemctl", "is-active", "traffic-guard.timer"])
     _, service_active = run_command(["systemctl", "is-active", "traffic-guard.service"])
     _, service_result = run_command(["systemctl", "show", "traffic-guard.service", "-p", "Result", "--value"])
@@ -201,8 +271,10 @@ def collect_state(message="", error=""):
         "limit_mib": max(limit // (1024 * 1024), 1),
         "action": config["ACTION"],
         "warn_percent": warn_percent,
+        "hard_limit_percent": hard_percent,
         "period": period,
         "warned": state["warned"] and not new_period,
+        "shutdown_done": 0 if new_period else state["shutdown_done"],
         "state_file": state_file,
         "current": current,
         "last_counter": state["last_counter"],
@@ -274,8 +346,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def csrf_value(self):
-        return hmac.new(self.token().encode(), b"update-threshold", hashlib.sha256).hexdigest()
+    def csrf_value(self, action="update-threshold"):
+        # 每个写操作单独的 CSRF 令牌，避免拿“改阈值”的令牌去提交复位
+        return hmac.new(self.token().encode(), action.encode(), hashlib.sha256).hexdigest()
 
     def render_page(self, message="", error=""):
         try:
@@ -324,6 +397,7 @@ form {{ display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; }}
 input[type=number] {{ width:180px; padding:12px 14px; border-radius:12px; border:1px solid rgba(148,163,184,.2); background:#0b1220; color:var(--text); font-size:16px; }}
 button {{ padding:12px 18px; border:0; border-radius:12px; background:#22c55e; color:#052e16; font-weight:700; cursor:pointer; }}
 button:hover {{ filter:brightness(1.08); }}
+button.warn {{ background:#f59e0b; color:#3b2003; }}
 </style>
 </head>
 <body>
@@ -336,6 +410,15 @@ button:hover {{ filter:brightness(1.08); }}
     <div class=\"status\">定时器：{html.escape(data['timer_active'])}</div>
   </div>
   {notice}
+  <div class=\"card\" style=\"margin-bottom:18px;\">
+    <div class=\"label\">超限关机保护</div>
+    <div class=\"sub\" style=\"margin:0 0 10px;\">本周期已自动关机 {data['shutdown_done']} 次。自动关机一次后不再自动关机，方便你登录处理；累计达到硬顶 {html.escape(str(data['hard_limit_percent']))}%（0 表示关闭）时再强制关机一次。</div>
+    <form method=\"post\" action=\"/reset-shutdown\">
+      <input type=\"hidden\" name=\"csrf\" value=\"{self.csrf_value('reset-shutdown')}\">
+      <button type=\"submit\" class=\"warn\">人工复位（恢复自动关机）</button>
+    </form>
+    <div class=\"sub\">复位只清除“已自动关机”标记，不清空本月已用流量。请先确认已处理超量原因。</div>
+  </div>
   <div class=\"card\" style=\"margin-bottom:18px;\">
     <div class=\"label\">修改阈值</div>
     <form method=\"post\" action=\"/update-threshold\">
@@ -396,7 +479,7 @@ button:hover {{ filter:brightness(1.08); }}
         self.render_page(message=params.get("message", [""])[0], error=params.get("error", [""])[0])
 
     def do_POST(self):
-        if self.path != "/update-threshold":
+        if self.path not in ("/update-threshold", "/reset-shutdown"):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         if not self.require_auth():
@@ -414,6 +497,27 @@ button:hover {{ filter:brightness(1.08); }}
             return
         payload = self.rfile.read(content_length).decode("utf-8", errors="replace")
         form = parse_qs(payload)
+        if self.path == "/reset-shutdown":
+            self.handle_reset_shutdown(form)
+        else:
+            self.handle_update_threshold(form)
+
+    def handle_reset_shutdown(self, form):
+        if not hmac.compare_digest(form.get("csrf", [""])[0], self.csrf_value("reset-shutdown")):
+            self.redirect(error="CSRF 校验失败")
+            return
+        config = read_env_file(CONFIG_FILE)
+        try:
+            ok = reset_shutdown_marker(config["STATE_FILE"])
+        except OSError as exc:
+            self.redirect(error=f"复位失败：{exc}")
+            return
+        if not ok:
+            self.redirect(error="状态文件不存在或无法解析，未做任何修改")
+            return
+        self.redirect(message="已清除“本周期已自动关机”标记，自动关机保护已恢复")
+
+    def handle_update_threshold(self, form):
         raw_limit = form.get("limit_mib", [""])[0].strip()
         if not raw_limit:
             self.redirect(error="阈值不能为空")
