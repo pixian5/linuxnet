@@ -1,0 +1,11 @@
+# 邮件通知配置示例
+# 支持任意 SMTP 服务商（189 / QQ / Gmail / 企业邮箱等）
+# 实际部署后此文件位于 /etc/traffic-guard/gmail-notify.conf（文件名沿用旧名以兼容）
+MAIL_FROM=sender@example.com
+MAIL_TO=receiver@example.com
+SMTP_HOST=smtp.189.cn
+SMTP_PORT=465
+# 465 端口用 off（隐式 TLS），587 端口用 on（STARTTLS）
+SMTP_STARTTLS=off
+SMTP_USER=sender@example.com
+SMTP_PASS=your_smtp_password

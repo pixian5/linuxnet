@@ -156,13 +156,23 @@ for idx, (title, query) in enumerate(queries.items()):
 conn.close()
 PY
 
+# 465 端口用隐式 TLS（tls_starttls off），587 用 STARTTLS（on）。
+# 配置里没写 SMTP_STARTTLS 时按端口推断，兼容旧配置文件。
+if [ -z "${SMTP_STARTTLS:-}" ]; then
+  if [ "${SMTP_PORT}" = "465" ]; then
+    SMTP_STARTTLS="off"
+  else
+    SMTP_STARTTLS="on"
+  fi
+fi
+
 cat > "$mail_config" <<MSMTP
 account default
 host ${SMTP_HOST}
 port ${SMTP_PORT}
 auth on
 tls on
-tls_starttls on
+tls_starttls ${SMTP_STARTTLS}
 tls_trust_file /etc/ssl/certs/ca-certificates.crt
 from ${MAIL_FROM}
 user ${SMTP_USER}

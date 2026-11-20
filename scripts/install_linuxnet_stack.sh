@@ -26,12 +26,16 @@ TRAFFIC_GUARD_LIMIT_MIB="${TRAFFIC_GUARD_LIMIT_MIB:-1024}"
 TRAFFIC_GUARD_ACTION="${TRAFFIC_GUARD_ACTION:-poweroff}"
 TRAFFIC_GUARD_WARN_PERCENT="${TRAFFIC_GUARD_WARN_PERCENT:-80}"
 TRAFFIC_GUARD_INTERVAL_SECONDS="${TRAFFIC_GUARD_INTERVAL_SECONDS:-10}"
-ENABLE_GMAIL_NOTIFY="${ENABLE_GMAIL_NOTIFY:-0}"
+# 邮件通知开关。旧名 ENABLE_GMAIL_NOTIFY 保留兼容，新名更通用（支持 189/QQ/Gmail 等任意 SMTP）
+ENABLE_MAIL_NOTIFY="${ENABLE_MAIL_NOTIFY:-${ENABLE_GMAIL_NOTIFY:-0}}"
 
 MAIL_FROM="${MAIL_FROM:-}"
 MAIL_TO="${MAIL_TO:-}"
 SMTP_HOST="${SMTP_HOST:-smtp.gmail.com}"
 SMTP_PORT="${SMTP_PORT:-587}"
+# 465 是隐式 TLS（直接 SSL），587 是 STARTTLS，两者不能混用。
+# 留空则按端口自动判断：465 -> off，其余 -> on。
+SMTP_STARTTLS="${SMTP_STARTTLS:-}"
 SMTP_USER="${SMTP_USER:-}"
 SMTP_PASS="${SMTP_PASS:-}"
 
@@ -313,22 +317,31 @@ EOF
 }
 
 write_mail_config() {
-  if [ "$ENABLE_GMAIL_NOTIFY" != "1" ]; then
-    log "跳过 Gmail 通知配置"
+  if [ "$ENABLE_MAIL_NOTIFY" != "1" ]; then
+    log "跳过邮件通知配置"
     return
   fi
 
   if [ -z "$MAIL_FROM" ] || [ -z "$MAIL_TO" ] || [ -z "$SMTP_USER" ] || [ -z "$SMTP_PASS" ]; then
-    echo "启用 Gmail 通知时，必须提供 MAIL_FROM/MAIL_TO/SMTP_USER/SMTP_PASS"
+    echo "启用邮件通知时，必须提供 MAIL_FROM/MAIL_TO/SMTP_USER/SMTP_PASS"
     exit 1
   fi
+  if [ -z "$SMTP_STARTTLS" ]; then
+    if [ "$SMTP_PORT" = "465" ]; then
+      SMTP_STARTTLS="off"
+    else
+      SMTP_STARTTLS="on"
+    fi
+  fi
+  case "$SMTP_STARTTLS" in on|off) ;; *) echo "SMTP_STARTTLS 只能是 on 或 off"; exit 1 ;; esac
 
-  log "写入 Gmail 通知配置"
+  log "写入邮件通知配置（${SMTP_HOST}:${SMTP_PORT}, STARTTLS=${SMTP_STARTTLS}）"
   cat > /etc/traffic-guard/gmail-notify.conf <<EOF
 MAIL_FROM=${MAIL_FROM}
 MAIL_TO=${MAIL_TO}
 SMTP_HOST=${SMTP_HOST}
 SMTP_PORT=${SMTP_PORT}
+SMTP_STARTTLS=${SMTP_STARTTLS}
 SMTP_USER=${SMTP_USER}
 SMTP_PASS=${SMTP_PASS}
 EOF

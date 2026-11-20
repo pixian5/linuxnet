@@ -1,6 +1,0 @@
-MAIL_FROM=sender@gmail.com
-MAIL_TO=receiver@gmail.com
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=sender@gmail.com
-SMTP_PASS=your_gmail_app_password

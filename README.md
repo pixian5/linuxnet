@@ -14,7 +14,7 @@
 - [templates/traffic-guard-web.py](templates/traffic-guard-web.py)
 - [templates/check-tx-shutdown.sh](templates/check-tx-shutdown.sh)
 - [templates/send-shutdown-mail.sh](templates/send-shutdown-mail.sh)
-- [templates/gmail-notify.conf.example](templates/gmail-notify.conf.example)
+- [templates/mail-notify.conf.example](templates/mail-notify.conf.example)
 
 ## 用法
 
@@ -45,16 +45,21 @@ ssh -L 5100:127.0.0.1:5100 -L 5101:127.0.0.1:5101 root@server
 
 浏览器打开 `http://127.0.0.1:5100` 和 `http://127.0.0.1:5101`。Traffic Guard 用户名为 `admin`，密码保存在服务器的 `/etc/traffic-guard/web-token`。如需域名访问，应使用带 TLS 和访问控制的反向代理，代理到本机监听端口。
 
-启用 Gmail 关机通知：
+启用邮件通知（支持任意 SMTP，下面以 189 邮箱 465 端口为例）：
 
 ```bash
-ENABLE_GMAIL_NOTIFY=1 \
-MAIL_FROM=sender@gmail.com \
-MAIL_TO=receiver@gmail.com \
-SMTP_USER=sender@gmail.com \
-SMTP_PASS=your_gmail_app_password \
+ENABLE_MAIL_NOTIFY=1 \
+MAIL_FROM=your@189.cn \
+MAIL_TO=your@189.cn \
+SMTP_HOST=smtp.189.cn \
+SMTP_PORT=465 \
+SMTP_STARTTLS=off \
+SMTP_USER=your@189.cn \
+SMTP_PASS=your_smtp_password \
 bash scripts/install_linuxnet_stack.sh
 ```
+
+`SMTP_STARTTLS` 留空时按端口自动判断：`465` → `off`（隐式 TLS），其它端口 → `on`（STARTTLS）。Gmail 用 `smtp.gmail.com:587` + 应用专用密码。
 
 ## 当前默认行为
 
