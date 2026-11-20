@@ -70,8 +70,28 @@ require_file() {
   fi
 }
 
+# 云镜像的 unattended-upgrades 常会持锁，直接 apt 会失败。
+# 这里最多等 10 分钟，让后台升级先跑完，避免部署因偶发锁冲突中断。
+wait_for_dpkg_lock() {
+  local waited=0
+  # fuser 不一定预装，用 pgrep 判断更稳；同时覆盖 lock-frontend 与普通 lock
+  while pgrep -f "unattended-upgr|apt-get|dpkg " >/dev/null 2>&1 \
+        && [ -e /var/lib/dpkg/lock-frontend ]; do
+    if [ "$waited" -ge 600 ]; then
+      echo "等待 dpkg 锁超时（600 秒），请检查 unattended-upgrades 是否卡住"
+      exit 1
+    fi
+    if [ "$waited" -eq 0 ]; then
+      log "dpkg 被其它进程占用（通常是 unattended-upgrades），等待其完成…"
+    fi
+    sleep 10
+    waited=$((waited + 10))
+  done
+}
+
 install_packages() {
   log "安装系统依赖"
+  wait_for_dpkg_lock
   apt-get update
   # 不再需要 bpfcc-tools：picosnitch 2.x 使用预编译 CO-RE 对象，只用内核/libbpf，不需要 BCC
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
